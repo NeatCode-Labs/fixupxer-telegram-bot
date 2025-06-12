@@ -27,10 +27,10 @@ When someone posts a Twitter/X link in your group:
    - The converted link that properly embeds media
 
 **Before**: Twitter videos don't play in Telegram
-![Before](https://i.imgur.com/EXAMPLE1.jpg)
+![Before](Before)
 
 **After**: Properly embedded video with playback controls
-![After](https://i.imgur.com/EXAMPLE2.jpg)
+![After](After)
 
 ## 🚀 Quick Start Guide (For Beginners)
 
