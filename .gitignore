@@ -1,0 +1,29 @@
+# Python virtual environment
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment variables
+.env
+
+# IDE files
+.idea/
+.vscode/
+*.code-workspace
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Addon and FxEmbed directories (including their .git directories)
+Addon/
+FxEmbed/
+
+# Exclude nested .git directories
+*/**/.git/ 
