@@ -1,9 +1,9 @@
-# <img src="fixupxer.png" alt="FixupXer Bot Logo" width="40" style="vertical-align: middle;"> FixupXer Telegram Bot
+# <img src="fixupxer_round.png" alt="FixupXer Bot Logo" width="40" style="vertical-align: middle;"> FixupXer Telegram Bot
 
 A Telegram bot that automatically detects and converts X/Twitter, Instagram and Facebook links to privacy-friendly alternatives (`fixupx.com`/`fxtwitter.com`, `kkinstagram.com`, `facebookez.com`) for perfect embeds in Telegram — with all tracking parameters stripped.
 
 <p align="center">
-  <img src="fixupxer.png" alt="FixupXer Bot Logo" width="150">
+  <img src="fixupxer_round.png" alt="FixupXer Bot Logo" width="150">
 </p>
 
 ## ✨ Features
