@@ -315,22 +315,28 @@ def _build_message(platform: str, username: str, fixed_url: str, clean_url: str 
         quoted_text = '\n'.join(quoted_lines)
         header = f'{header}\n\n{quoted_text}'
 
-    if platform in (PLATFORM_X, PLATFORM_INSTAGRAM):
-        msg = (
-            f"{header}\n\n{esc_divider}\n"
-            f"🔄 Cleaned & converted URL: {esc_fixed_url}\n\n"
-            f"✅ Clean URL \\(if embed isn't available\\): {esc_clean_url}\n\n"
-            f"⛔️ Original \\(dirty\\) URL: {esc_original_url}\n{esc_divider}"
-        )
-    elif platform == PLATFORM_FACEBOOK:
-        msg = (
-            f"{header}\n\n{esc_divider}\n"
-            f"🔄 Converted URL: {esc_fixed_url}\n\n"
-            f"⛔️ Original URL \\(if embed isn't available\\): {esc_clean_url}\n{esc_divider}"
-        )
-    else:
-        # Fallback to old behaviour
-        msg = f"{header}\n\n{esc_fixed_url}"
+    # Build MarkdownV2 hyperlink labels with proper escaping
+    label_fixed = escape_markdown("🔄 Cleaned & converted URL")
+    label_clean = escape_markdown("✅ Clean URL (if embed isn't available)")
+    label_original = escape_markdown("⛔ Original (dirty) URL")
+
+    # Assemble hyperlink strings (URLs must escape only ')' and '\\' inside)
+    fixed_link = f"[{label_fixed}]({fixed_url})"
+    clean_link = f"[{label_clean}]({clean_url})" if clean_url else None
+    original_link = f"[{label_original}]({original_url})"
+
+    # Combine links with single newline
+    links = [fixed_link]
+    if clean_link:
+        links.append(clean_link)
+    links.append(original_link)
+    links_block = "\n".join(links)
+
+    # Final composed message
+    msg = (
+        f"{header}\n\n{esc_divider}\n"
+        f"{links_block}\n{esc_divider}"
+    )
     return msg
 
 # ------------------------ PLATFORM IDENTIFICATION --------------------
