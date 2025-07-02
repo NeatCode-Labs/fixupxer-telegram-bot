@@ -26,11 +26,6 @@ When someone posts a Twitter/X link in your group:
    - Any text from the original message
    - The converted link that properly embeds media
 
-**Before**: Twitter videos don't play in Telegram
-![Before](Before)
-
-**After**: Properly embedded video with playback controls
-![After](After)
 
 ## 🚀 Quick Start Guide (For Beginners)
 
