@@ -32,8 +32,33 @@ BOT_ADMINS = []  # Add your Telegram user ID here
 TRACKING_PARAMS = [
     's', 't', 'twclid', 'ref_src', 'ref_url', 'cxt', 'src', 'partner', 'medium', 
     'source', 'campaign', 'ref', 'feature', 'vertical', 'linkId', 'attr_userid',
-    # Add more tracking parameters as you discover them
+    # Instagram / generic
+    'igsh', 'igshid', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term',
+    'utm_content', 'fbclid',
+    # Additional X/Twitter edge-cases
+    'lang', 'variant', 'gar_data_id', 'cn', 'via', 'related', 'hashtags', 
+    'original_referer', 'text',
+    # Additional Instagram edge-cases
+    'si', 'story_media_id', 'h_eid', 'img_index', 'taken-by', 'taken-at', 
+    'igid', 'set', '_branch_match_id',
+    # Facebook tracking parameters
+    'fb_action_ids', 'fb_action_types', 'fb_ref', 'fb_source', 'mibextid',
+    'extid', 'wtsid', 'rdr', 'hrc', 'refsrc', '_rdr', '_rdc', 'fref', 'pnref',
+    '__tn__', 'eid', 'lst', 'paipv', 'eav', 'hash', 'refid', 'notif_id', 'notif_t',
+    # Other common marketing/analytics params
+    'ad_id', 'campaign', 'cid', 'clickid', 'ef_id', 'gclid', 'msclkid', 'ttclid', 'yclid',
 ]
+
+# Message divider used in templates
+DIVIDER = '───────────────────────'
+
+# Supported platforms enumeration
+PLATFORM_X = 'x'
+PLATFORM_INSTAGRAM = 'instagram'
+PLATFORM_FACEBOOK = 'facebook'
+
+# Generic URL regex (find any URL – we'll check domains later)
+URL_PATTERN = re.compile(r'https?://\S+')
 
 # Initialize database
 def init_db():
@@ -203,32 +228,173 @@ def convert_to_fixupx(url):
     # If it's none of the above, just return the cleaned URL
     return cleaned_url
 
-# Define URL pattern to match x.com, twitter.com, fixupx.com, and fxtwitter.com links
-URL_PATTERN = re.compile(r'https?://(?:www\.)?(x\.com|twitter\.com|fixupx\.com|fxtwitter\.com)/[^\s]+')
+# ------------------------ URL HELPERS ----------------------------
+
+def _clean_query(url: str) -> str:
+    """Remove known tracking parameters from any url."""
+    parsed = urllib.parse.urlparse(url)
+    query_params = urllib.parse.parse_qs(parsed.query)
+    cleaned_params = {k: v for k, v in query_params.items() if k not in TRACKING_PARAMS}
+    clean_query = urllib.parse.urlencode(cleaned_params, doseq=True)
+    return urllib.parse.urlunparse((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        parsed.params,
+        clean_query,
+        parsed.fragment
+    ))
+
+def _convert_x(url: str):
+    """Return (fixed_url, clean_url) for X/Twitter/fixupx links"""
+    parsed = urllib.parse.urlparse(url)
+    domain = parsed.netloc.lower()
+
+    # Clean first (remove tracking)
+    clean_original = _clean_query(url)
+
+    # Determine fixed url
+    if 'fixupx.com' in domain or 'fxtwitter.com' in domain:
+        fixed = clean_original  # already converted, just cleaned
+    elif 'x.com' in domain:
+        fixed = clean_original.replace('x.com', 'fixupx.com')
+    elif 'twitter.com' in domain:
+        fixed = clean_original.replace('twitter.com', 'fxtwitter.com')
+    else:
+        fixed = clean_original  # fallback
+
+    return fixed, clean_original
+
+def _convert_instagram(url: str):
+    """Return (fixed_url, clean_url) for Instagram links."""
+    clean_original = _clean_query(url)
+    parsed = urllib.parse.urlparse(clean_original)
+    domain = parsed.netloc.lower()
+
+    if 'kkinstagram.com' in domain:
+        fixed = clean_original  # already converted
+    else:
+        fixed = clean_original.replace(domain, 'www.kkinstagram.com')
+
+    return fixed, clean_original
+
+def _convert_facebook(url: str):
+    """Return (fixed_url, clean_url) for Facebook links."""
+    # Clean query parameters for Facebook as well
+    cleaned_url = _clean_query(url)
+    parsed = urllib.parse.urlparse(cleaned_url)
+    path_and_query = parsed.path
+    if parsed.query:
+        path_and_query += f'?{parsed.query}'
+    fixed = f'https://facebookez.com{path_and_query}'
+    return fixed, cleaned_url
+
+# ------------------------ MESSAGE BUILDER ----------------------------
+
+# Helper to escape Telegram Markdown V2 special characters
+def escape_markdown(text: str) -> str:
+    if not text:
+        return ''
+    # Escape all Telegram MarkdownV2 special characters
+    return re.sub(r'([_\*\[\]\(\)~`>#+\-=|{}.!])', r'\\\1', text)
+
+def _build_message(platform: str, username: str, fixed_url: str, clean_url: str | None, original_url: str, user_text: str = "") -> str:
+    """Generate the final Telegram message according to platform template, escaping Markdown entities."""
+    esc_username = escape_markdown(username)
+    esc_fixed_url = escape_markdown(fixed_url)
+    esc_clean_url = escape_markdown(clean_url) if clean_url else None
+    esc_original_url = escape_markdown(original_url)
+    esc_divider = escape_markdown(DIVIDER)
+    header = f'_Originally posted by {esc_username} on date and time of this message:_'
+    
+    # Build the message with user text if present
+    if user_text:
+        # Format user text as a blockquote - each line needs to start with >
+        # Escape each line's content but not the > character
+        quoted_lines = [f'> {escape_markdown(line)}' for line in user_text.split('\n')]
+        quoted_text = '\n'.join(quoted_lines)
+        header = f'{header}\n\n{quoted_text}'
+
+    if platform in (PLATFORM_X, PLATFORM_INSTAGRAM):
+        msg = (
+            f"{header}\n\n{esc_divider}\n"
+            f"🔄 Cleaned & converted URL: {esc_fixed_url}\n\n"
+            f"✅ Clean URL \\(if embed isn't available\\): {esc_clean_url}\n\n"
+            f"⛔️ Original \\(dirty\\) URL: {esc_original_url}\n{esc_divider}"
+        )
+    elif platform == PLATFORM_FACEBOOK:
+        msg = (
+            f"{header}\n\n{esc_divider}\n"
+            f"🔄 Converted URL: {esc_fixed_url}\n\n"
+            f"⛔️ Original URL \\(if embed isn't available\\): {esc_clean_url}\n{esc_divider}"
+        )
+    else:
+        # Fallback to old behaviour
+        msg = f"{header}\n\n{esc_fixed_url}"
+    return msg
+
+# ------------------------ PLATFORM IDENTIFICATION --------------------
+
+def _identify_platform(domain: str) -> str | None:
+    domain = domain.lower()
+    if any(d in domain for d in ('x.com', 'twitter.com', 'fixupx.com', 'fxtwitter.com')):
+        return PLATFORM_X
+    if 'instagram.com' in domain or 'kkinstagram.com' in domain:
+        return PLATFORM_INSTAGRAM
+    if domain.endswith('facebook.com'):
+        return PLATFORM_FACEBOOK
+    return None
+
+# ------------------------ MAIN CONVERSION ENTRY ----------------------
+
+def convert_supported_url(url: str):
+    """Detect platform and return tuple(platform, fixed_url, clean_url). clean_url may be None."""
+    parsed = urllib.parse.urlparse(url)
+    platform = _identify_platform(parsed.netloc)
+    if platform == PLATFORM_X:
+        fixed, clean = _convert_x(url)
+        return platform, fixed, clean
+    if platform == PLATFORM_INSTAGRAM:
+        fixed, clean = _convert_instagram(url)
+        return platform, fixed, clean
+    if platform == PLATFORM_FACEBOOK:
+        fixed, clean = _convert_facebook(url)
+        return platform, fixed, clean
+    return None, None, None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
     await update.message.reply_text(
-        "Hi! I'm FixupXer Bot. I'll automatically convert any x.com or twitter.com links "
-        "to fixupx.com or fxtwitter.com and remove tracking parameters.\n\n"
-        "I'll also clean tracking from fixupx.com and fxtwitter.com links if they're directly posted.\n\n"
-        "The original poster can delete my message by replying to it with /delete.\n\n"
-        "Just add me to your group chat and I'll do the rest!\n\n"
-        "Note: I need admin privileges to delete messages."
+        "🤖 <b>Hi! I'm FixupXer bot.</b>\n\n"
+        "I automatically <b>clean</b> tracking parameters and <b>convert</b> social-media links so they embed beautifully in Telegram.\n\n"
+        "🔄 <b>X/Twitter</b>: x.com / twitter.com → fixupx.com / fxtwitter.com\n"
+        "📸 <b>Instagram</b>: instagram.com → kkinstagram.com\n"
+        "📘 <b>Facebook</b>: facebook.com → facebookez.com\n\n"
+        "⚠️ <b>Heads-up</b>: Facebook often hides extra tracking behind secondary links that only activate after clicking on a primary link, so cleaning in most cases is impossible.\n\n"
+        "Add me to your group and I'll take care of every supported link automatically.\n\n"
+        "The original poster can delete my message at any time by replying with /delete (I need admin rights to delete).",
+        parse_mode="HTML"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
     await update.message.reply_text(
-        "Add me to your group chat, and I'll automatically detect and convert any "
-        "x.com or twitter.com links to fixupx.com or fxtwitter.com.\n\n"
-        "I'll also remove tracking parameters from these links to protect your privacy.\n\n"
-        "I handle both original Twitter/X links and already converted fixupx/fxtwitter links.\n\n"
-        "When someone posts a matching link, I'll:\n"
-        "1. Delete their original message\n"
-        "2. Post a new message with their username and the fixed link\n\n"
-        "The original poster can delete my message by replying to it with /delete.\n\n"
-        "Note: I need admin privileges to delete messages."
+        "📝 <b>FixupXer bot – Help</b>\n\n"
+        "Simply add me to any chat. Whenever someone posts a supported link, I'll: \n"
+        "1. Delete the original message (needs admin rights).\n"
+        "2. Repost a cleaned & converted version with proper embeds.\n\n"
+        "<b>Supported platforms</b>:\n"
+        "🔄 <b>X/Twitter</b>: x.com / twitter.com → fixupx.com / fxtwitter.com\n"
+        "📸 <b>Instagram</b>: instagram.com → kkinstagram.com\n"
+        "📘 <b>Facebook</b>: facebook.com → facebookez.com\n\n"
+        "⚠️ <b>Note</b>: Facebook may still attach hidden tracking after click – I strip everything I can see.\n\n"
+        "<b>Commands</b>:\n"
+        "• /start – Show welcome information\n"
+        "• /help – Show this message\n"
+        "• /stats – Bot usage statistics (admins)\n"
+        "• /delete – Original poster/Admin can delete my repost\n\n"
+        "Need more info? Check the README or open an issue on GitHub.",
+        parse_mode="HTML"
     )
 
 # Command to show statistics
@@ -287,18 +453,18 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         stats_message += "*Most Active Groups:*\n"
         for chat in active_chats:
             chat_title = chat[0] or "Unknown"
-            stats_message += f"- {chat_title}: {chat[1]} conversions\n"
+            stats_message += f"\\- {escape_markdown(chat_title)}: {chat[1]} conversions\n"
         stats_message += "\n"
     
     if active_users:
         stats_message += "*Most Active Users:*\n"
         for user in active_users:
             username = user[0] or "Unknown"
-            stats_message += f"- @{username}: {user[1]} conversions\n"
+            stats_message += f"\\- @{escape_markdown(username)}: {user[1]} conversions\n"
     
     conn.close()
     
-    await update.message.reply_text(stats_message, parse_mode="Markdown")
+    await update.message.reply_text(stats_message, parse_mode="MarkdownV2")
 
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /delete command to delete the bot's message."""
@@ -367,9 +533,9 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await track_user(update.message.from_user)
     await track_chat(update.effective_chat)
     
-    # Find all Twitter/X URLs in the message
-    matches = URL_PATTERN.findall(message)
-    if not matches:
+    # Find all URLs in the message
+    url_candidates = URL_PATTERN.findall(message)
+    if not url_candidates:
         return
     
     # Get message metadata
@@ -379,76 +545,69 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     date_str = date_obj.strftime("%Y-%m-%d")
     time_str = date_obj.strftime("%H:%M:%S")
     
-    # Find and convert each URL
-    for match in URL_PATTERN.finditer(message):
-        original_url = match.group(0)
-        fixed_url = convert_to_fixupx(original_url)
+    # Iterate over found urls and process the first supported one
+    for idx, candidate in enumerate(url_candidates):
+        platform, fixed_url, clean_url = convert_supported_url(candidate)
+        if platform is None:
+            continue  # Not a supported link
+
+        original_url = candidate
         
-        # Only process if the URL was actually changed or if it contains tracking parameters
-        # that need to be removed (even if the domain is already fixupx or fxtwitter)
-        if fixed_url != original_url:
-            try:
-                # Create attribution text in italics
-                attribution = f"_Originally posted by {username} on date and time of this message:_"
-                
-                # Extract any additional text from the original message
-                # Get the text before and after the URL
-                start_idx = match.start()
-                end_idx = match.end()
-                
-                text_before = message[:start_idx].strip()
-                text_after = message[end_idx:].strip()
-                
-                # Combine any user text
-                user_text = ""
-                if text_before:
-                    user_text += text_before + " "
-                if text_after:
-                    user_text += text_after
-                
-                # Construct the final message
-                final_message = attribution
-                
-                # Add user text if present
-                if user_text.strip():
-                    final_message += f"\n\n{user_text.strip()}"
-                
-                # Add the fixed URL
-                final_message += f"\n\n{fixed_url}"
-                
-                # Post new message with attribution
-                chat_id = update.effective_chat.id
-                bot_message = await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=final_message,
-                    parse_mode="Markdown",
-                    disable_web_page_preview=False
-                )
-                
-                # Store the original user ID with this bot message ID
-                user_message_map[bot_message.message_id] = user.id
-                
-                # Track conversion for statistics
-                await track_conversion(user.id, chat_id, original_url, fixed_url)
-                
-                # Delete the original message
-                await update.message.delete()
-                
-                # Log the action
-                logger.info(f"Converted {original_url} to {fixed_url} for {username}")
-                
-                # We only handle the first match to avoid duplicate actions
-                break
-                
-            except Exception as e:
-                logger.error(f"Error processing message: {e}")
-                # If deletion fails (likely due to missing admin privileges), reply instead
-                await update.message.reply_text(
-                    "I need admin privileges to delete messages. For now, here's the fixed link:\n\n"
-                    f"{fixed_url}",
-                    disable_web_page_preview=False
-                )
-                break
+        # Extract user's text from the message
+        # Find where this URL appears in the message
+        url_start = message.find(candidate)
+        url_end = url_start + len(candidate)
+        
+        # Get text before and after the URL
+        text_before = message[:url_start].strip()
+        text_after = message[url_end:].strip()
+        
+        # Combine user text
+        user_text = ""
+        if text_before:
+            user_text = text_before
+        if text_after:
+            if user_text:
+                user_text += " " + text_after
+            else:
+                user_text = text_after
+
+        try:
+            # Build message according to template
+            final_message = _build_message(platform, username, fixed_url, clean_url, original_url, user_text)
+            
+            # Post new message with attribution
+            chat_id = update.effective_chat.id
+            bot_message = await context.bot.send_message(
+                chat_id=chat_id,
+                text=final_message,
+                parse_mode="MarkdownV2",
+                disable_web_page_preview=False
+            )
+            
+            # Store the original user ID with this bot message ID
+            user_message_map[bot_message.message_id] = user.id
+            
+            # Track conversion for statistics
+            await track_conversion(user.id, chat_id, original_url, fixed_url)
+            
+            # Delete the original message
+            await update.message.delete()
+            
+            # Log the action
+            logger.info(f"Converted {original_url} to {fixed_url} for {username}")
+            
+            break  # process only first supported link
+            
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
+            # If deletion fails (likely due to missing admin privileges), reply instead
+            await update.message.reply_text(
+                "I need admin privileges to delete messages. For now, here's the fixed link:\n\n"
+                f"{fixed_url}",
+                disable_web_page_preview=False
+            )
+            break
 
 def main() -> None:
     """Start the bot."""

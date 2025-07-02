@@ -1,6 +1,6 @@
 # <img src="fixupxer.png" alt="FixupXer Bot Logo" width="40" style="vertical-align: middle;"> FixupXer Telegram Bot
 
-A Telegram bot that automatically detects and converts `x.com` and `twitter.com` links to `fixupx.com` and `fxtwitter.com` for better media embedding in Telegram.
+A Telegram bot that automatically detects and converts X/Twitter, Instagram and Facebook links to privacy-friendly alternatives (`fixupx.com`/`fxtwitter.com`, `kkinstagram.com`, `facebookez.com`) for perfect embeds in Telegram — with all tracking parameters stripped.
 
 <p align="center">
   <img src="fixupxer.png" alt="FixupXer Bot Logo" width="150">
@@ -8,17 +8,28 @@ A Telegram bot that automatically detects and converts `x.com` and `twitter.com`
 
 ## ✨ Features
 
-- 🔄 **Automatic Link Conversion**: Converts X/Twitter links to properly embed media in Telegram
+- 🔄 **Automatic Link Conversion**: Cleans & converts X/Twitter, Instagram and Facebook links so they embed perfectly in Telegram
 - 🧹 **Tracking Parameter Removal**: Removes all tracking parameters for privacy protection
-- 🔄 **Cleans Already Converted Links**: Also removes tracking from fixupx/fxtwitter links
+- 🔄 **Cleans Already Converted Links**: Also removes tracking from previously converted `fixupx.com`, `fxtwitter.com`, `kkinstagram.com` and `facebookez.com` links
 - 📝 **Preserves Original Text**: Keeps any additional text from the original message
 - 🏷️ **Attribution**: Credits the original poster with a timestamp
 - 🗑️ **Delete Control**: Original posters can remove bot messages with `/delete`
 - 📊 **Usage Statistics**: Admin-only feature to track bot usage
 
+## 🧭 Commands
+
+| Command | Where to use | Who can use it | What it does |
+|---------|--------------|---------------|--------------|
+| `/start` | Any chat (DM or group) | Anyone | Sends the welcome/introduction message. |
+| `/help` | Any chat | Anyone | Displays a concise help message summarizing features and usage. |
+| `/delete` *(reply)* | Group chats | Original poster **or** group admins | When replied to the bot's repost, deletes the bot message (bot needs "Delete Messages" permission). |
+| `/stats` | Private chat with the bot | IDs listed in `BOT_ADMINS` | Shows usage statistics and basic analytics. |
+
+> **Tip:** In large groups the bot must have admin rights to see every message and to delete originals with `/delete`.
+
 ## 📱 How It Works
 
-When someone posts a Twitter/X link in your group:
+When someone posts a supported link (X/Twitter, Instagram, or Facebook) in your group:
 
 1. The bot detects the link and immediately deletes the original message
 2. It posts a new message with:
@@ -116,7 +127,7 @@ The bot needs admin privileges to delete messages:
 
 ### Step 7: Test It Out!
 
-1. Post a message with a Twitter/X link in your group
+1. Post a message with any supported link (e.g., a tweet, Instagram post, or Facebook post) in your group
 2. Watch the bot convert it automatically
 3. Try replying to the bot's message with `/delete` to test that feature
 
@@ -198,10 +209,26 @@ BOT_ADMINS = []  # Add your Telegram user ID here
 
 ### Viewing Stats
 
-As a bot admin, send `/stats` to the bot in private message to see:
-- Total groups, users, and conversions
-- Most active groups
-- Most active users
+As a bot admin, send `/stats` to the bot **in a private chat**. The bot replies with a Markdown-formatted snapshot of:
+
+| Field | What it means |
+|-------|---------------|
+| **Total Groups** | How many unique Telegram chats/groups the bot has been active in. |
+| **Total Users** | Count of distinct users that have triggered a conversion. |
+| **Total Conversions** | Number of URLs the bot has cleaned/converted. |
+| **Most Active Groups / Users** | Top 5 chats and users ranked by conversions.
+
+#### Where does this data come from?
+
+FixupXer keeps a tiny local SQLite database (`bot_stats.db`) on the same device/VPS that runs the bot.  It contains three tables:
+
+* **chats** – `chat_id`, `chat_title`, `chat_type`, timestamps.
+* **users** – `user_id`, `username`, first/last names, timestamps.
+* **conversions** – timestamp, `user_id`, `chat_id`, original URL, converted URL.
+
+The database **does NOT store** full message texts, media, or any sensitive personal info beyond the numeric Telegram ID and public profile fields already visible in the chat.  Nothing is ever transmitted to NeatCode Labs or any external server.
+
+You can inspect or delete the database at any time (the bot will recreate empty tables on next start). If you don't want stats at all, set the environment variable `FIXUPXER_DISABLE_STATS=1` before launching the bot to disable all database writes.
 
 ## ❓ Troubleshooting
 
@@ -218,4 +245,34 @@ Contributions are welcome! Feel free to fork this repository and submit pull req
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## 🚨 Disclaimer
+
+**Privacy**: This bot processes URLs *locally* on Telegram's servers only for the lifetime of each message. It does **not** collect, store or transmit any user data or URLs to any external servers.
+
+**Third-Party Services**: FixupXer depends on public, third-party proxy services for link conversion:
+
+* `facebookez.com` – Facebook link conversion
+* `fixupx.com` – Twitter / X link conversion
+* `kkinstagram.com` – Instagram link conversion
+
+These services are **not operated by NeatCode Labs** and may stop working at any time without notice. We have no control over their availability or functionality.
+
+**Trademarks**: Names such as "Facebook", "Twitter", "X", "Instagram" and others are trademarks of their respective owners. This app is **not affiliated with, endorsed by, or connected to** these services or to Meta Platforms Inc.
+
+**Warranty**: This software is provided *"as is"*, without warranty of any kind. Use at your own risk.
+
+**Note to kkinstagram.com and facebookez.com maintainers**: If you wish to be credited in this README, please contact us via the contact form on our [website](https://neatcodelabs.com/).
+
+---
+
+<div align="center">
+
+**Created with ❤️ by [NeatCode Labs](https://neatcodelabs.com)**  
+Visit us for more useful tools and projects!
+
+[![Website](https://img.shields.io/badge/Website-neatcodelabs.com-blue?style=for-the-badge)](https://neatcodelabs.com)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Us-ff5e5b?style=for-the-badge&logo=ko-fi)](https://ko-fi.com/neatcodelabs)
+
+</div>
