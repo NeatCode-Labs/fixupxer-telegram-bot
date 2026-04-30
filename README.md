@@ -308,7 +308,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 * `facebookez.com` – Facebook link conversion
 * `fixupx.com` / `fxtwitter.com` – Twitter / X link conversion
-* `toinstagram.com` (primary — embeds media + post/reel title & description) and `instagram7.com` (backup — embeds media without title/description) – Instagram link conversion via [InstaFix](https://github.com/Wikidepia/InstaFix)‑compatible mirrors. The bot picks the first one whose embed health‑check passes; `FIXUPXER_IG_PROXY_ORDER` is configurable. See `OPERATIONS.md` for how to swap in a new proxy when one of these dies.
+* `toinstagram.com` and `adamlikes.men` (primaries — both embed media + post/reel title & description) and `instagram7.com` (backup — embeds media without title/description) – Instagram link conversion via [InstaFix](https://github.com/Wikidepia/InstaFix)‑compatible mirrors. The bot picks the first one whose embed health‑check passes; `FIXUPXER_IG_PROXY_ORDER` is configurable. See `OPERATIONS.md` for how to swap in a new proxy when one of these dies.
 
 These services are **not operated by NeatCode Labs** and may stop working at any time without notice. We have no control over their availability or functionality.
 
