@@ -1,0 +1,18 @@
+services:
+  fixupxer:
+    build: .
+    image: fixupxer-tg-bot:latest
+    container_name: fixupxer-tg-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      FIXUPXER_DB_PATH: /data/bot_stats.db
+    volumes:
+      - bot-data:/data
+    # Uncomment when running in webhook mode (FIXUPXER_MODE=webhook).
+    # ports:
+    #   - "8443:8443"
+
+volumes:
+  bot-data:

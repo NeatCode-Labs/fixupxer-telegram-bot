@@ -3,14 +3,23 @@ venv/
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+.ruff_cache/
 
-# Database files
+# Database files (incl. SQLite WAL / SHM sidecars and ad-hoc backups)
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
+*.bak
+*.bak.*
 
 # Environment variables
 .env
+
+# Local-only operations runbook (contains host-specific paths and secrets context)
+OPERATIONS.md
 
 # IDE files
 .idea/
