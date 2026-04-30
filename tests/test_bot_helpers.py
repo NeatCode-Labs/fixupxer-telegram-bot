@@ -113,9 +113,10 @@ def test_convert_instagram_rewrites_historical_proxy() -> None:
     assert bot._DEFAULT_IG_PROXIES[0] in fixed
 
 
-def test_convert_instagram_no_www_proxy_normalises_paste() -> None:
-    """A pasted www.<no-www-proxy> URL gets normalised to the bare host."""
-    proxy = next(iter(bot._IG_PROXY_NO_WWW))
+def test_convert_instagram_strips_www_from_proxy_paste() -> None:
+    """A pasted www.<active-proxy> URL gets normalised to the bare host
+    (we always emit bare-host proxy URLs, regardless of which proxy)."""
+    proxy = bot._DEFAULT_IG_PROXIES[0]
     p, fixed, clean = _run(bot.convert_supported_url(
         f"https://www.{proxy}/p/ABC/?igsh=spam",
     ))
@@ -123,6 +124,17 @@ def test_convert_instagram_no_www_proxy_normalises_paste() -> None:
     assert f"://{proxy}/" in fixed
     assert f"www.{proxy}" not in fixed
     assert "igsh" not in fixed
+
+
+def test_convert_instagram_emits_bare_host_for_default_proxy() -> None:
+    """Newly converted IG URLs (from instagram.com input) use bare host too."""
+    p, fixed, clean = _run(bot.convert_supported_url(
+        "https://www.instagram.com/p/ABC/?igsh=spam",
+    ))
+    assert p == bot.PLATFORM_INSTAGRAM
+    proxy = bot._DEFAULT_IG_PROXIES[0]
+    assert f"://{proxy}/" in fixed
+    assert f"www.{proxy}" not in fixed
 
 
 def test_unsupported_clean_url_returns_none() -> None:
@@ -192,7 +204,7 @@ def test_build_message_includes_all_three_links_when_clean_provided() -> None:
     msg = bot._build_message(
         platform=bot.PLATFORM_INSTAGRAM,
         username="@a",
-        fixed_url="https://www.toinstagram.com/p/ABC/",
+        fixed_url="https://toinstagram.com/p/ABC/",
         clean_url="https://www.instagram.com/p/ABC/",
         original_url="https://www.instagram.com/p/ABC/?igsh=spam",
         user_text="",

@@ -96,19 +96,18 @@ STATS_DISABLED: bool = os.environ.get("FIXUPXER_DISABLE_STATS") == "1"
 # embeds image/video via a 302 to the CDN media URL, no title/description).
 # _ig_probe accepts both styles (full og:image/og:video HTML and image/* or
 # video/* CDN redirects).
+# All proxies are addressed on the bare host (no `www.` prefix). Adamlikes
+# requires it (no DNS record for `www.`), and the others accept either form
+# — so the consistent bare-host policy keeps the URL shape uniform.
 # _HISTORICAL_IG_HOSTS lists hosts the bot recognises as Instagram so pasted
 # URLs on those (dead/passthrough) proxies still get cleaned and re-hosted
 # onto an active proxy.
-# _IG_PROXY_NO_WWW pins proxies whose vhost only resolves on the bare host
-# (e.g. adamlikes.men has no `www.` DNS record). Without this we'd build
-# `https://www.adamlikes.men/...` URLs that fail at DNS resolution.
 _DEFAULT_IG_PROXIES = ("toinstagram.com", "adamlikes.men", "instagram7.com")
 _HISTORICAL_IG_HOSTS = (
     "kkinstagram.com",
     "eeinstagram.com",
     "ddinstagram.com",
 )
-_IG_PROXY_NO_WWW: frozenset[str] = frozenset({"adamlikes.men"})
 IG_PROXY_ORDER: list[str] = _parse_str_csv(
     os.environ.get("FIXUPXER_IG_PROXY_ORDER"), _DEFAULT_IG_PROXIES,
 )
@@ -637,12 +636,12 @@ def _instagram_url_with_proxy(clean_url: str, proxy: str) -> str:
     """Rewrite an IG URL's netloc to the chosen proxy via urlunparse.
 
     Uses urlunparse (not str.replace) so that the rewrite is robust against
-    mixed-case input like https://WWW.Instagram.com/... . Adds a `www.`
-    prefix unless the proxy is listed in _IG_PROXY_NO_WWW (those proxies
-    only resolve on the bare host).
+    mixed-case input like https://WWW.Instagram.com/... . The netloc is set
+    to the bare proxy host (any leading `www.` in the configured proxy is
+    stripped) so the user-facing URL is uniform across all proxies.
     """
     parsed = urllib.parse.urlparse(clean_url)
-    netloc = proxy if proxy in _IG_PROXY_NO_WWW or proxy.startswith("www.") else f"www.{proxy}"
+    netloc = proxy[4:] if proxy.startswith("www.") else proxy
     new_url = urllib.parse.urlunparse((
         parsed.scheme or "https",
         netloc,
@@ -752,11 +751,11 @@ async def _convert_instagram_async(url: str) -> tuple[str | None, str]:
 
     bare_host = _strip_ig_subdomain(domain)
 
-    # Already on an *active* proxy — normalise the www./bare form via
-    # _instagram_url_with_proxy (so a pasted `www.adamlikes.men/...` becomes
-    # `adamlikes.men/...`, since adamlikes has no www. DNS record). If the
-    # cleaned URL was already in canonical form, return it as-is so the
-    # caller short-circuits to the 2-link layout.
+    # Already on an *active* proxy — normalise via _instagram_url_with_proxy
+    # so a pasted `www.toinstagram.com/...` (or any other proxy with www.)
+    # becomes the canonical bare-host form we always emit. If the cleaned URL
+    # was already canonical, the rewrite is a no-op and we still return it
+    # so the caller short-circuits to the 2-link layout.
     matched_proxy = next(
         (p for p in IG_PROXY_ORDER if bare_host == p or bare_host.endswith("." + p)),
         None,
