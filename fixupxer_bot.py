@@ -91,21 +91,24 @@ BOT_ADMINS: list[int] = _parse_int_csv(os.environ.get("FIXUPXER_ADMINS"), "FIXUP
 STATS_DISABLED: bool = os.environ.get("FIXUPXER_DISABLE_STATS") == "1"
 
 # ---- Instagram proxy configuration --------------------------------------
-# Default order: toinstagram.com (primary — embeds image/video and also
-# extracts post/reel title + description) and instagram7.com (backup — embeds
-# image/video but without title/description metadata). Both serve via 302
-# redirects to the CDN media URL; _ig_probe accepts that style alongside
-# proxies that return full og:image/og:video HTML directly.
+# Default order: toinstagram.com and adamlikes.men (full OG meta tags —
+# media + post/reel title & description) and instagram7.com (backup —
+# embeds image/video via a 302 to the CDN media URL, no title/description).
+# _ig_probe accepts both styles (full og:image/og:video HTML and image/* or
+# video/* CDN redirects).
 # _HISTORICAL_IG_HOSTS lists hosts the bot recognises as Instagram so pasted
 # URLs on those (dead/passthrough) proxies still get cleaned and re-hosted
 # onto an active proxy.
-_DEFAULT_IG_PROXIES = ("toinstagram.com", "instagram7.com")
+# _IG_PROXY_NO_WWW pins proxies whose vhost only resolves on the bare host
+# (e.g. adamlikes.men has no `www.` DNS record). Without this we'd build
+# `https://www.adamlikes.men/...` URLs that fail at DNS resolution.
+_DEFAULT_IG_PROXIES = ("toinstagram.com", "adamlikes.men", "instagram7.com")
 _HISTORICAL_IG_HOSTS = (
     "kkinstagram.com",
     "eeinstagram.com",
     "ddinstagram.com",
-    "adamlikes.men",
 )
+_IG_PROXY_NO_WWW: frozenset[str] = frozenset({"adamlikes.men"})
 IG_PROXY_ORDER: list[str] = _parse_str_csv(
     os.environ.get("FIXUPXER_IG_PROXY_ORDER"), _DEFAULT_IG_PROXIES,
 )
@@ -629,10 +632,12 @@ def _instagram_url_with_proxy(clean_url: str, proxy: str) -> str:
     """Rewrite an IG URL's netloc to the chosen proxy via urlunparse.
 
     Uses urlunparse (not str.replace) so that the rewrite is robust against
-    mixed-case input like https://WWW.Instagram.com/...
+    mixed-case input like https://WWW.Instagram.com/... . Adds a `www.`
+    prefix unless the proxy is listed in _IG_PROXY_NO_WWW (those proxies
+    only resolve on the bare host).
     """
     parsed = urllib.parse.urlparse(clean_url)
-    netloc = proxy if proxy.startswith("www.") else f"www.{proxy}"
+    netloc = proxy if proxy in _IG_PROXY_NO_WWW or proxy.startswith("www.") else f"www.{proxy}"
     new_url = urllib.parse.urlunparse((
         parsed.scheme or "https",
         netloc,
@@ -742,14 +747,22 @@ async def _convert_instagram_async(url: str) -> tuple[str | None, str]:
 
     bare_host = _strip_ig_subdomain(domain)
 
-    # Already on an *active* proxy — keep cleaned URL as-is, no rewrite.
-    if any(bare_host == p or bare_host.endswith("." + p) for p in IG_PROXY_ORDER):
-        return clean_original, None
+    # Already on an *active* proxy — normalise the www./bare form via
+    # _instagram_url_with_proxy (so a pasted `www.adamlikes.men/...` becomes
+    # `adamlikes.men/...`, since adamlikes has no www. DNS record). If the
+    # cleaned URL was already in canonical form, return it as-is so the
+    # caller short-circuits to the 2-link layout.
+    matched_proxy = next(
+        (p for p in IG_PROXY_ORDER if bare_host == p or bare_host.endswith("." + p)),
+        None,
+    )
+    if matched_proxy is not None:
+        canonical = _instagram_url_with_proxy(clean_original, matched_proxy)
+        return canonical, None
 
-    # On a HISTORICAL proxy (kk/ee/instagram7/dd) that's no longer in
-    # IG_PROXY_ORDER → re-host onto an active proxy, fall through to probing.
-    # First normalise the URL back to instagram.com so the probe path is
-    # constructed cleanly.
+    # On a HISTORICAL proxy (kk/ee/dd) that's no longer in IG_PROXY_ORDER →
+    # re-host onto an active proxy, fall through to probing. First normalise
+    # the URL back to instagram.com so the probe path is constructed cleanly.
     if any(bare_host == p or bare_host.endswith("." + p) for p in _HISTORICAL_IG_HOSTS):
         clean_original = urllib.parse.urlunparse((
             parsed.scheme or "https",

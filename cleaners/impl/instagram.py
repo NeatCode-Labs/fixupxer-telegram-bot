@@ -56,7 +56,15 @@ _PRESERVE = frozenset({
 InstagramCleaner = AggressiveCleaner(
     id="instagram",
     category=CleanerCategory.SOCIAL_MEDIA,
-    domains=("instagram.com", "kkinstagram.com", "eeinstagram.com", "instagram7.com"),
+    domains=(
+        "instagram.com",
+        "kkinstagram.com",
+        "eeinstagram.com",
+        "instagram7.com",
+        "ddinstagram.com",
+        "adamlikes.men",
+        "toinstagram.com",
+    ),
     tracking=_TRACKING,
     preserve=_PRESERVE,
 )

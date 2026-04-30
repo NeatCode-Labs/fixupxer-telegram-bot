@@ -113,6 +113,18 @@ def test_convert_instagram_rewrites_historical_proxy() -> None:
     assert bot._DEFAULT_IG_PROXIES[0] in fixed
 
 
+def test_convert_instagram_no_www_proxy_normalises_paste() -> None:
+    """A pasted www.<no-www-proxy> URL gets normalised to the bare host."""
+    proxy = next(iter(bot._IG_PROXY_NO_WWW))
+    p, fixed, clean = _run(bot.convert_supported_url(
+        f"https://www.{proxy}/p/ABC/?igsh=spam",
+    ))
+    assert p == bot.PLATFORM_INSTAGRAM
+    assert f"://{proxy}/" in fixed
+    assert f"www.{proxy}" not in fixed
+    assert "igsh" not in fixed
+
+
 def test_unsupported_clean_url_returns_none() -> None:
     """An already-clean non-platform URL must not trigger a bot reply."""
     p, fixed, clean = _run(bot.convert_supported_url("https://example.com/page"))

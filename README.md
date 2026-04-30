@@ -259,7 +259,7 @@ You can inspect or delete the database at any time (the bot will recreate empty 
 | `FIXUPXER_WEBHOOK_PORT` | `8443` | Webhook bind port. |
 | `FIXUPXER_WEBHOOK_PATH` | *(bot token)* | URL path component; defaults to the token to make the endpoint unguessable. |
 | `FIXUPXER_WEBHOOK_SECRET` | *(none)* | Optional `X-Telegram-Bot-Api-Secret-Token` value enforced by PTB. |
-| `FIXUPXER_IG_PROXY_ORDER` | `toinstagram.com,instagram7.com` | Ordered Instagram proxy fallback list. |
+| `FIXUPXER_IG_PROXY_ORDER` | `toinstagram.com,adamlikes.men,instagram7.com` | Ordered Instagram proxy fallback list. |
 | `FIXUPXER_IG_HEALTH_TTL_SECONDS` | `600` | How long an embed-health probe result is cached. |
 | `FIXUPXER_IG_PROBE_INTERVAL_SECONDS` | `120` | Background probe interval; set to `0` to disable. |
 | `FIXUPXER_IG_VERIFY_EMBED` | `1` | Set to `0` to skip the embed health-check (also auto-disabled if `httpx`/`cachetools` are missing). |
