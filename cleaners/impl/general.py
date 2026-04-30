@@ -1,0 +1,62 @@
+"""General fallback cleaner — drops 106 universal tracking params + tracking prefixes.
+
+Unlike domain-specific cleaners, this one keeps unknown params (so it's safe
+to apply to *any* URL).
+"""
+from __future__ import annotations
+
+from ..base import CleanerCategory, CleanerUtils, UrlCleaner
+
+_COMMON_TRACKING = frozenset({
+    # UTM
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "utm_id", "utm_name", "utm_reader", "utm_brand", "utm_pubreferrer",
+    "utm_swu", "utm_viz_id", "utm_referrer", "utm_social", "utm_social-type",
+    # Click IDs
+    "fbclid", "gclid", "dclid", "twclid", "msclkid", "yclid", "gbraid",
+    "wbraid", "ko_click_id", "epik", "pp", "gclsrc", "gad_source",
+    # Analytics
+    "_ga", "_gl", "_hsenc", "_hsmi", "__hssc", "__hstc", "mc_cid", "mc_eid",
+    "_openstat", "vgo_ee", "hsCtaTracking", "_ke", "_kx", "__hmb", "__hmc",
+    "__hmd", "__hml", "__s", "rb_clickid", "ai", "_bta_tid", "_bta_c",
+    # General
+    "ref", "referer", "referrer", "source", "src", "share", "si", "spm",
+    "campaign_id", "ad_id", "affiliate", "aff_id", "click_id", "clickid",
+    "session_id", "sessionid", "soc_src", "soc_trk", "trk", "trkInfo",
+    # Email
+    "eid", "mid", "ml_subscriber", "ml_subscriber_hash", "eh", "amp",
+    "amp_device_id", "usqp", "ved", "usp", "sa", "cid", "icid",
+    # Social & sharing
+    "shared_by", "share_id", "share_token", "__twitter_impression", "spJobID",
+    "spMailingID", "spReportId", "spUserID", "__tn__", "fb_action_ids",
+    # E-commerce
+    "irclickid", "irgwc", "ircid", "sharedid", "sscid", "wickedid",
+    "zanpid", "pepperjam_enterprise_affiliate", "ranMID", "ranEAID",
+    "ranSiteID", "shareasale_site_id", "shareasale_user_id",
+})
+
+# Lowercase prefixes that mark a parameter as tracking regardless of suffix.
+_PREFIXES = (
+    "wt.", "pk_", "at_", "sc_", "campaign", "itm_", "elq",
+    "matomo_", "mtm_", "clk", "ito", "xtor", "piwik_", "dm_", "cx_",
+)
+
+
+class _GeneralCleaner(UrlCleaner):
+    id = "general"
+    category = CleanerCategory.GENERAL
+
+    def matches(self, url: str) -> bool:
+        return True  # opt-in everywhere; runs last per priority
+
+    def clean(self, url: str) -> str:
+        def decide(key: str, pair: str) -> str | None:
+            lc = key.lower()
+            if lc in _COMMON_TRACKING or any(lc.startswith(p) for p in _PREFIXES):
+                return None
+            return pair  # keep everything else (unlike aggressive cleaners)
+        # Always run filter_query so it can fix `&-without-?` malformations.
+        return CleanerUtils.filter_query(url, decide)
+
+
+GeneralTrackingCleaner = _GeneralCleaner()
