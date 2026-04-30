@@ -1,6 +1,6 @@
 # <img src="fixupxer_round.png" alt="FixupXer Bot Logo" width="40" style="vertical-align: middle;"> FixupXer Telegram Bot
 
-A Telegram bot that automatically strips tracking parameters from any URL and converts X/Twitter, Instagram and Facebook links to privacy-friendly alternatives (`fixupx.com`/`fxtwitter.com`, `toinstagram.com`/`adamlikes.men`, `facebookez.com`) for perfect embeds in Telegram. The cleaner engine ports the full Android FixupXer rule set (~20 platform‑specific cleaners — Twitter, Instagram, Facebook, YouTube, TikTok, Reddit, LinkedIn, Amazon, Google Search, Substack, Pinterest, Snapchat, Discord, GitHub, Spotify, eBay, AliExpress, …) plus a generic UTM/click‑id remover for everything else.
+A Telegram bot that automatically strips tracking parameters from any URL and converts X/Twitter, Instagram and Facebook links to privacy-friendly alternatives (`fixupx.com`/`fxtwitter.com`, `toinstagram.com`/`instagram7.com`, `facebookez.com`) for perfect embeds in Telegram. The cleaner engine ports the full Android FixupXer rule set (~20 platform‑specific cleaners — Twitter, Instagram, Facebook, YouTube, TikTok, Reddit, LinkedIn, Amazon, Google Search, Substack, Pinterest, Snapchat, Discord, GitHub, Spotify, eBay, AliExpress, …) plus a generic UTM/click‑id remover for everything else.
 
 <p align="center">
   <img src="fixupxer_round.png" alt="FixupXer Bot Logo" width="150">
@@ -12,7 +12,7 @@ A Telegram bot that automatically strips tracking parameters from any URL and co
 - 🧹 **Universal Tracking Removal**: Strips per‑platform tracking from ~20 social/shopping/search platforms (YouTube, TikTok, Reddit, LinkedIn, Amazon, Spotify, …) plus a generic UTM/click‑id pass for any other host
 - 🔁 **Auto‑healing Instagram proxies**: Health‑checks each candidate's OpenGraph tags, falls back through the configured list, opens a circuit breaker on consistent failures
 - 🎯 **Smart redirect skip**: When a proxy 302s back to `instagram.com` (common for `/reel/` paths) and `instagram.com` itself serves OG tags, the bot sends the `instagram.com` URL directly so Telegram's crawler doesn't have to chase the same redirect chain
-- ♻️ **Rewrites stale Instagram proxy URLs**: A pasted `kkinstagram.com` / `eeinstagram.com` / `ddinstagram.com` / `adamlikes.men` link is re‑hosted onto whatever proxy is currently healthy
+- ♻️ **Rewrites stale Instagram proxy URLs**: A pasted link on a dead Instagram proxy is automatically re‑hosted onto whatever proxy is currently healthy
 - 🤫 **No spam on already‑clean URLs**: If the cleaner engine and domain rewrite both leave the URL unchanged, the bot stays silent
 - 📝 **Preserves Original Text**: Keeps any additional text from the original message
 - 🏷️ **Attribution**: Credits the original poster with a timestamp
