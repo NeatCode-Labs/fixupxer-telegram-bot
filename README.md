@@ -262,6 +262,7 @@ You can inspect or delete the database at any time (the bot will recreate empty 
 | `FIXUPXER_IG_PROXY_ORDER` | `toinstagram.com,adamlikes.men,instagram7.com` | Ordered Instagram proxy fallback list. |
 | `FIXUPXER_IG_HEALTH_TTL_SECONDS` | `600` | How long an embed-health probe result is cached. |
 | `FIXUPXER_IG_PROBE_INTERVAL_SECONDS` | `120` | Background probe interval; set to `0` to disable. |
+| `FIXUPXER_IG_BG_PROBE_PATH` | `/p/DXKIQo0CPjX/` | URL path used by the background probe. Must be a real public post that every configured proxy can serve; swap if the default post is deleted. |
 | `FIXUPXER_IG_VERIFY_EMBED` | `1` | Set to `0` to skip the embed health-check (also auto-disabled if `httpx`/`cachetools` are missing). |
 | `FIXUPXER_IG_CACHE_BUST` | `0` | Append a `_t=` query param to Instagram URLs to bypass Telegram's link preview cache. |
 

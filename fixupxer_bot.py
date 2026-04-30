@@ -136,7 +136,12 @@ if IG_VERIFY_EMBED and _cachetools is None:
 _IG_HTTP_TIMEOUT: float = 3.0
 _IG_USER_AGENT: str = "TelegramBot (like TwitterBot)"
 _IG_MAX_BYTES: int = 65536
-_IG_BG_PROBE_PATH: str = "/instagram/"  # Stable IG official account, used as a known-good probe URL.
+# Path used by the background probe to keep proxy health current. Must be a
+# real, public post that all configured proxies can serve. Configurable via
+# env var so operators can swap it if the chosen post is ever deleted.
+_IG_BG_PROBE_PATH: str = os.environ.get(
+    "FIXUPXER_IG_BG_PROBE_PATH", "/p/DXKIQo0CPjX/",
+)
 _IG_CIRCUIT_OPEN_SECONDS: int = 300
 _IG_CIRCUIT_FAIL_THRESHOLD: int = 5
 _IG_CIRCUIT_FAIL_WINDOW: int = 60
