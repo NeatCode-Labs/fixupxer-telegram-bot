@@ -63,10 +63,10 @@ class _YouTubeCleaner(UrlCleaner):
     category = CleanerCategory.VIDEO_PLATFORMS
 
     def matches(self, url: str) -> bool:
-        lower = url.lower()
-        return any(host in lower for host in (
-            "youtube.com", "youtu.be", "youtube-nocookie.com", "music.youtube.com",
-        ))
+        # music.youtube.com is covered by the youtube.com subdomain match.
+        return CleanerUtils.host_matches(
+            url, ("youtube.com", "youtu.be", "youtube-nocookie.com"),
+        )
 
     def clean(self, url: str) -> str:
         if "youtu.be/" in url:

@@ -60,9 +60,9 @@ class _GoogleSearchCleaner(UrlCleaner):
     category = CleanerCategory.SEARCH_ENGINES
 
     def matches(self, url: str) -> bool:
-        lower = url.lower()
-        if not any(domain in lower for domain in _DOMAINS):
+        if not CleanerUtils.host_matches(url, _DOMAINS):
             return False
+        lower = url.lower()
         return "/url?" in lower or "/search?" in lower
 
     def clean(self, url: str) -> str:

@@ -40,6 +40,31 @@ class CleanerUtils:
     _DOUBLE_SLASH = re.compile(r"/+")
 
     @staticmethod
+    def extract_host(url: str) -> str:
+        """Return the lowercased hostname of ``url`` ('' when absent)."""
+        without_proto = url.split("://", 1)[-1]
+        end = len(without_proto)
+        for ch in "/?#:":
+            i = without_proto.find(ch)
+            if i != -1 and i < end:
+                end = i
+        return without_proto[:end].lower()
+
+    @staticmethod
+    def host_matches(url: str, domains: Iterable[str]) -> bool:
+        """True when the URL's *hostname* equals one of ``domains`` or is a
+        subdomain of one.
+
+        Substring checks like ``"x.com" in url`` false-positive on path text
+        ("/story-about-x.com") and unrelated hosts ("maxx.com", "t.me" inside
+        "about.meta.com"); this anchors the match at the host level.
+        """
+        host = CleanerUtils.extract_host(url)
+        if host.startswith("www."):
+            host = host[4:]
+        return any(host == d or host.endswith("." + d) for d in domains)
+
+    @staticmethod
     def preprocess(url: str) -> str:
         """Fix the common `https://example.com&a=b` glitch (no `?` before `&`)."""
         if "&" in url and "?" not in url:
@@ -57,7 +82,14 @@ class CleanerUtils:
         if "://" in result:
             scheme_end = result.index("://") + 3
             head, tail = result[:scheme_end], result[scheme_end:]
-            tail = CleanerUtils._DOUBLE_SLASH.sub("/", tail)
+            # Collapse duplicate slashes only up to the query/fragment —
+            # query values may legitimately embed full URLs (?next=https://…).
+            cut = len(tail)
+            for ch in "?#":
+                i = tail.find(ch)
+                if i != -1 and i < cut:
+                    cut = i
+            tail = CleanerUtils._DOUBLE_SLASH.sub("/", tail[:cut]) + tail[cut:]
             result = head + tail
         return result
 

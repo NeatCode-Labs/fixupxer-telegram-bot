@@ -76,8 +76,7 @@ class _AmazonCleaner(UrlCleaner):
     category = CleanerCategory.E_COMMERCE
 
     def matches(self, url: str) -> bool:
-        lower = url.lower()
-        return any(domain in lower for domain in _DOMAINS)
+        return CleanerUtils.host_matches(url, _DOMAINS)
 
     def clean(self, url: str) -> str:
         asin = self._extract_asin(url)

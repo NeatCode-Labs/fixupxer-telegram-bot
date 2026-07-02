@@ -35,8 +35,7 @@ class AggressiveCleaner(UrlCleaner):
         self._extra_keep = extra_keep_predicate
 
     def matches(self, url: str) -> bool:
-        lower = url.lower()
-        return any(domain in lower for domain in self._domains)
+        return CleanerUtils.host_matches(url, self._domains)
 
     def clean(self, url: str) -> str:
         if "?" not in url:

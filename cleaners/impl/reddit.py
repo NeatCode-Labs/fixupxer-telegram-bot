@@ -1,7 +1,7 @@
 """Reddit cleaner — short-link path mirrors `RedditCleaner.kt`."""
 from __future__ import annotations
 
-from ..base import CleanerCategory, UrlCleaner
+from ..base import CleanerCategory, CleanerUtils, UrlCleaner
 
 _TRACKING = frozenset({
     "context", "correlator", "rdt_cid", "share_id",
@@ -46,8 +46,7 @@ class _RedditCleaner(UrlCleaner):
     category = CleanerCategory.SOCIAL_MEDIA
 
     def matches(self, url: str) -> bool:
-        lower = url.lower()
-        return "reddit.com" in lower or "redd.it" in lower
+        return CleanerUtils.host_matches(url, ("reddit.com", "redd.it"))
 
     def clean(self, url: str) -> str:
         # redd.it short-links: drop the entire query string (matches app).
@@ -56,7 +55,6 @@ class _RedditCleaner(UrlCleaner):
             return url if q == -1 else url[:q]
         if "?" not in url:
             return url
-        from ..base import CleanerUtils
 
         def decide(key: str, pair: str) -> str | None:
             if key in _PRESERVE:

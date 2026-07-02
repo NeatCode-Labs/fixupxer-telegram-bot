@@ -1,7 +1,7 @@
 """LinkedIn cleaner — keeps `f_*` filter params, strips lnkd.in queries."""
 from __future__ import annotations
 
-from ..base import CleanerCategory, UrlCleaner
+from ..base import CleanerCategory, CleanerUtils, UrlCleaner
 
 _TRACKING = frozenset({
     "trk", "trkInfo", "trkEmail", "li_theme", "li_ft",
@@ -50,8 +50,7 @@ class _LinkedInCleaner(UrlCleaner):
     category = CleanerCategory.SOCIAL_MEDIA
 
     def matches(self, url: str) -> bool:
-        lower = url.lower()
-        return "linkedin.com" in lower or "lnkd.in" in lower
+        return CleanerUtils.host_matches(url, ("linkedin.com", "lnkd.in"))
 
     def clean(self, url: str) -> str:
         if "lnkd.in" in url.lower():
@@ -59,7 +58,6 @@ class _LinkedInCleaner(UrlCleaner):
             return url if q == -1 else url[:q]
         if "?" not in url:
             return url
-        from ..base import CleanerUtils
 
         def decide(key: str, pair: str) -> str | None:
             if key in _PRESERVE:

@@ -28,8 +28,7 @@ class _DomainBlocklistCleaner(UrlCleaner):
         self._tracking = frozenset(tracking)
 
     def matches(self, url: str) -> bool:
-        lower = url.lower()
-        return any(d in lower for d in self._domains)
+        return CleanerUtils.host_matches(url, self._domains)
 
     def clean(self, url: str) -> str:
         if "?" not in url:
