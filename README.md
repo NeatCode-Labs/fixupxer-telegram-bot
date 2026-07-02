@@ -227,10 +227,11 @@ As a bot admin, send `/stats` to the bot **in a private chat**. The bot replies 
 
 | Field | What it means |
 |-------|---------------|
-| **Total Groups** | How many unique Telegram chats/groups the bot has been active in. |
+| **Total Groups** | How many unique Telegram groups/supergroups the bot has been active in. |
+| **Total DMs** | How many private chats (DMs with the bot) have triggered a conversion. |
 | **Total Users** | Count of distinct users that have triggered a conversion. |
 | **Total Conversions** | Number of URLs the bot has cleaned/converted. |
-| **Most Active Groups / Users** | Top 5 chats and users ranked by conversions.
+| **Most Active Groups / Users** | Top 5 groups and users ranked by conversions (DMs are excluded from the group ranking).
 
 #### Where does this data come from?
 

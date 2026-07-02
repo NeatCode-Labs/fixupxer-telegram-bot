@@ -1285,8 +1285,14 @@ def _stats_query_sync() -> dict:
     conn = _db_connect()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(DISTINCT chat_id) FROM chats")
-        total_chats = cur.fetchone()[0]
+        # Private chats (DMs with the bot) have no title and are not groups;
+        # count and rank them separately so the group stats stay meaningful.
+        cur.execute(
+            "SELECT COUNT(*) FROM chats WHERE chat_type IN ('group', 'supergroup')"
+        )
+        total_groups = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM chats WHERE chat_type = 'private'")
+        total_dms = cur.fetchone()[0]
         cur.execute("SELECT COUNT(DISTINCT user_id) FROM users")
         total_users = cur.fetchone()[0]
         cur.execute("SELECT COUNT(*) FROM conversions")
@@ -1294,6 +1300,7 @@ def _stats_query_sync() -> dict:
         cur.execute(
             """SELECT c.chat_title, COUNT(*) AS count
                FROM conversions cv JOIN chats c ON cv.chat_id = c.chat_id
+               WHERE c.chat_type IN ('group', 'supergroup')
                GROUP BY c.chat_id ORDER BY count DESC LIMIT 5"""
         )
         active_chats = cur.fetchall()
@@ -1306,7 +1313,8 @@ def _stats_query_sync() -> dict:
     finally:
         conn.close()
     return {
-        "total_chats": total_chats,
+        "total_groups": total_groups,
+        "total_dms": total_dms,
         "total_users": total_users,
         "total_conversions": total_conversions,
         "active_chats": active_chats,
@@ -1333,7 +1341,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     parts = [
         "📊 *Bot Statistics*",
         "",
-        f"*Total Groups:* {data['total_chats']}",
+        f"*Total Groups:* {data['total_groups']}",
+        f"*Total DMs:* {data['total_dms']}",
         f"*Total Users:* {data['total_users']}",
         f"*Total Conversions:* {data['total_conversions']}",
         "",
