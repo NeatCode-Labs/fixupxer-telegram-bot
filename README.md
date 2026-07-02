@@ -231,7 +231,7 @@ As a bot admin, send `/stats` to the bot **in a private chat**. The bot replies 
 | **Total DMs** | How many private chats (DMs with the bot) have triggered a conversion. |
 | **Total Users** | Count of distinct users that have triggered a conversion. |
 | **Total Conversions** | Number of URLs the bot has cleaned/converted. |
-| **Most Active Groups / Users** | Top 5 groups and users ranked by conversions (DMs are excluded from the group ranking).
+| **Most Active Groups / Users** | Top 5 groups and users ranked by conversions (DMs are excluded from the group ranking). |
 
 #### Where does this data come from?
 
@@ -260,8 +260,8 @@ You can inspect or delete the database at any time (the bot will recreate empty 
 | `FIXUPXER_WEBHOOK_PORT` | `8443` | Webhook bind port. |
 | `FIXUPXER_WEBHOOK_PATH` | *(bot token)* | URL path component; defaults to the token to make the endpoint unguessable. |
 | `FIXUPXER_WEBHOOK_SECRET` | *(none)* | Optional `X-Telegram-Bot-Api-Secret-Token` value enforced by PTB. |
-| `FIXUPXER_IG_PROXY_ORDER` | `toinstagram.com,adamlikes.men,instagram7.com,kkinstagram.com` | Ordered Instagram proxy fallback list. |
-| `FIXUPXER_TIKTOK_PROXY_ORDER` | `tnktok.com,tfxktok.com,tiktokez.com,kktiktok.com` | Ordered TikTok proxy fallback list (subdomain prefixes like `vm.` are preserved on rewrite). |
+| `FIXUPXER_IG_PROXY_ORDER` | `toinstagram.com, adamlikes.men, instagram7.com, kkinstagram.com` | Ordered Instagram proxy fallback list. |
+| `FIXUPXER_TIKTOK_PROXY_ORDER` | `tnktok.com, tfxktok.com, tiktokez.com, kktiktok.com` | Ordered TikTok proxy fallback list (subdomain prefixes like `vm.` are preserved on rewrite). |
 | `FIXUPXER_TIKTOK_VERIFY_EMBED` | *(follows `FIXUPXER_IG_VERIFY_EMBED`)* | Set to `0` to skip the TikTok embed health-check. |
 | `FIXUPXER_TIKTOK_BG_PROBE_PATH` | `/@cwknix/video/7529264180000509202` | URL path used by the TikTok background probe. Must be a real public video; swap if it is deleted. |
 | `FIXUPXER_IG_HEALTH_TTL_SECONDS` | `600` | How long an embed-health probe result is cached. |
