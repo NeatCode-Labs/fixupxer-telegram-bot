@@ -1,6 +1,6 @@
 # <img src="fixupxer_round.png" alt="FixupXer Bot Logo" width="40" style="vertical-align: middle;"> FixupXer Telegram Bot
 
-A Telegram bot that automatically strips tracking parameters from any URL and converts X/Twitter, Instagram and Facebook links to privacy-friendly alternatives (`fixupx.com`/`fxtwitter.com`, `toinstagram.com`/`instagram7.com`, `facebookez.com`) for perfect embeds in Telegram. The cleaner engine ports the full Android FixupXer rule set (~20 platform‑specific cleaners — Twitter, Instagram, Facebook, YouTube, TikTok, Reddit, LinkedIn, Amazon, Google Search, Substack, Pinterest, Snapchat, Discord, GitHub, Spotify, eBay, AliExpress, …) plus a generic UTM/click‑id remover for everything else.
+A Telegram bot that automatically strips tracking parameters from any URL and converts X/Twitter, Instagram, TikTok and Facebook links to privacy-friendly alternatives (`fixupx.com`/`fxtwitter.com`, `toinstagram.com`/`adamlikes.men`/`instagram7.com`/`kkinstagram.com`, `tnktok.com`, `facebookez.com`) for perfect embeds in Telegram. The cleaner engine ports the full Android FixupXer rule set (~20 platform‑specific cleaners — Twitter, Instagram, Facebook, YouTube, TikTok, Reddit, LinkedIn, Amazon, Google Search, Substack, Pinterest, Snapchat, Discord, GitHub, Spotify, eBay, AliExpress, …) plus a generic UTM/click‑id remover for everything else.
 
 <p align="center">
   <img src="fixupxer_round.png" alt="FixupXer Bot Logo" width="150">
@@ -8,10 +8,10 @@ A Telegram bot that automatically strips tracking parameters from any URL and co
 
 ## ✨ Features
 
-- 🔄 **Automatic Link Conversion**: Cleans & converts X/Twitter, Instagram and Facebook links so they embed perfectly in Telegram
-- 🧹 **Universal Tracking Removal**: Strips per‑platform tracking from ~20 social/shopping/search platforms (YouTube, TikTok, Reddit, LinkedIn, Amazon, Spotify, …) plus a generic UTM/click‑id pass for any other host
-- 🔁 **Auto‑healing Instagram proxies**: Health‑checks each candidate's OpenGraph tags, falls back through the configured list, opens a circuit breaker on consistent failures
-- 🎯 **Smart redirect skip**: When a proxy 302s back to `instagram.com` (common for `/reel/` paths) and `instagram.com` itself serves OG tags, the bot sends the `instagram.com` URL directly so Telegram's crawler doesn't have to chase the same redirect chain
+- 🔄 **Automatic Link Conversion**: Cleans & converts X/Twitter, Instagram, TikTok and Facebook links so they embed perfectly in Telegram
+- 🧹 **Universal Tracking Removal**: Strips per‑platform tracking from ~20 social/shopping/search platforms (YouTube, Reddit, LinkedIn, Amazon, Spotify, …) plus a generic UTM/click‑id pass for any other host
+- 🔁 **Auto‑healing Instagram & TikTok proxies**: Health‑checks each candidate's OpenGraph tags before replying, falls back through the configured list, opens a circuit breaker on consistent failures
+- 🎯 **Prefers direct‑serving proxies**: A proxy that 302s back to `instagram.com` (common for `/reel/` paths) is only used as a last resort — the bot keeps probing for a proxy that serves the embed itself, because Telegram doesn't render previews for plain `instagram.com` links
 - ♻️ **Rewrites stale Instagram proxy URLs**: A pasted link on a dead Instagram proxy is automatically re‑hosted onto whatever proxy is currently healthy
 - 🤫 **No spam on already‑clean URLs**: If the cleaner engine and domain rewrite both leave the URL unchanged, the bot stays silent
 - 📝 **Preserves Original Text**: Keeps any additional text from the original message
@@ -27,7 +27,7 @@ A Telegram bot that automatically strips tracking parameters from any URL and co
 | `/help` | Any chat | Anyone | Displays a concise help message summarizing features and usage. |
 | `/delete` *(reply)* | Group chats | Original poster **or** group admins | When replied to the bot's repost, deletes the bot message (bot needs "Delete Messages" permission). |
 | `/stats` | Private chat with the bot | IDs listed in `FIXUPXER_ADMINS` | Shows usage statistics and basic analytics. |
-| `/setproxy` | Private chat with the bot | IDs listed in `FIXUPXER_ADMINS` | Override or auto-pick the active Instagram proxy and inspect per-proxy health. |
+| `/setproxy` | Private chat with the bot | IDs listed in `FIXUPXER_ADMINS` | Override or auto-pick the active Instagram proxy; `status` shows per-proxy health for both Instagram and TikTok. |
 
 > **Tip:** In large groups the bot must have admin rights to see every message and to delete originals with `/delete`.
 
@@ -43,8 +43,8 @@ A Telegram bot that automatically strips tracking parameters from any URL and co
 When someone posts a URL in your group:
 
 1. The bot extracts up to 3 URLs from the message and runs each through the cleaner engine.
-2. For X/Twitter, Instagram, and Facebook URLs it also rewrites the host to a privacy‑friendly proxy (`fixupx.com` / `toinstagram.com` / `facebookez.com`) so Telegram renders a proper embed. For Instagram specifically, when the chosen proxy 302s back to `instagram.com` (typical for `/reel/` paths) and `instagram.com` itself serves OG tags, the bot uses the `instagram.com` URL directly — Telegram's crawler embeds it without the redirect lottery.
-3. For other platforms (YouTube, TikTok, Reddit, Amazon, …) it just removes tracking parameters; the host is preserved.
+2. For X/Twitter, Instagram, TikTok, and Facebook URLs it also rewrites the host to a privacy‑friendly proxy (`fixupx.com` / `toinstagram.com` / `tnktok.com` / `facebookez.com`) so Telegram renders a proper embed. For Instagram specifically, the bot probes the configured proxies in order and picks the first one that serves the embed itself; a proxy that merely 302s back to `instagram.com` (typical for `/reel/` paths) is kept only as a last-resort fallback.
+3. For other platforms (YouTube, Reddit, Amazon, …) it just removes tracking parameters; the host is preserved.
 4. If at least one URL was meaningfully changed, the bot posts a new message with attribution + any user text + the cleaned/converted link, then deletes the original. URLs that are already clean trigger no reply.
 
 
@@ -259,7 +259,10 @@ You can inspect or delete the database at any time (the bot will recreate empty 
 | `FIXUPXER_WEBHOOK_PORT` | `8443` | Webhook bind port. |
 | `FIXUPXER_WEBHOOK_PATH` | *(bot token)* | URL path component; defaults to the token to make the endpoint unguessable. |
 | `FIXUPXER_WEBHOOK_SECRET` | *(none)* | Optional `X-Telegram-Bot-Api-Secret-Token` value enforced by PTB. |
-| `FIXUPXER_IG_PROXY_ORDER` | `toinstagram.com,adamlikes.men,instagram7.com` | Ordered Instagram proxy fallback list. |
+| `FIXUPXER_IG_PROXY_ORDER` | `toinstagram.com,adamlikes.men,instagram7.com,kkinstagram.com` | Ordered Instagram proxy fallback list. |
+| `FIXUPXER_TIKTOK_PROXY_ORDER` | `tnktok.com,tfxktok.com,tiktokez.com,kktiktok.com` | Ordered TikTok proxy fallback list (subdomain prefixes like `vm.` are preserved on rewrite). |
+| `FIXUPXER_TIKTOK_VERIFY_EMBED` | *(follows `FIXUPXER_IG_VERIFY_EMBED`)* | Set to `0` to skip the TikTok embed health-check. |
+| `FIXUPXER_TIKTOK_BG_PROBE_PATH` | `/@cwknix/video/7529264180000509202` | URL path used by the TikTok background probe. Must be a real public video; swap if it is deleted. |
 | `FIXUPXER_IG_HEALTH_TTL_SECONDS` | `600` | How long an embed-health probe result is cached. |
 | `FIXUPXER_IG_PROBE_INTERVAL_SECONDS` | `120` | Background probe interval; set to `0` to disable. |
 | `FIXUPXER_IG_BG_PROBE_PATH` | `/p/DXKIQo0CPjX/` | URL path used by the background probe. Must be a real public post that every configured proxy can serve; swap if the default post is deleted. |
@@ -308,7 +311,8 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 * `facebookez.com` – Facebook link conversion
 * `fixupx.com` / `fxtwitter.com` – Twitter / X link conversion
-* `toinstagram.com` and `adamlikes.men` (primaries — both embed media + post/reel title & description) and `instagram7.com` (backup — embeds media without title/description) – Instagram link conversion via [InstaFix](https://github.com/Wikidepia/InstaFix)‑compatible mirrors. The bot picks the first one whose embed health‑check passes; `FIXUPXER_IG_PROXY_ORDER` is configurable. See `OPERATIONS.md` for how to swap in a new proxy when one of these dies.
+* `tnktok.com` (and the `tfxktok.com` / `tiktokez.com` / `kktiktok.com` fallbacks) – TikTok link conversion; the bot picks the first one whose embed health‑check passes; `FIXUPXER_TIKTOK_PROXY_ORDER` is configurable
+* `toinstagram.com` and `adamlikes.men` (primaries — both embed media + post/reel title & description) and `instagram7.com` / `kkinstagram.com` (backups) – Instagram link conversion via [InstaFix](https://github.com/Wikidepia/InstaFix)‑compatible mirrors. The bot picks the first one whose embed health‑check passes (preferring proxies that serve the embed directly); `FIXUPXER_IG_PROXY_ORDER` is configurable. See `OPERATIONS.md` for how to swap in a new proxy when one of these dies.
 
 These services are **not operated by NeatCode Labs** and may stop working at any time without notice. We have no control over their availability or functionality.
 

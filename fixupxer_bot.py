@@ -12,7 +12,13 @@ import urllib.parse
 from html import escape as html_escape
 
 from telegram import Update
-from telegram.error import BadRequest, Forbidden, TelegramError
+from telegram.error import (
+    BadRequest,
+    Conflict,
+    Forbidden,
+    NetworkError,
+    TelegramError,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -91,9 +97,9 @@ BOT_ADMINS: list[int] = _parse_int_csv(os.environ.get("FIXUPXER_ADMINS"), "FIXUP
 STATS_DISABLED: bool = os.environ.get("FIXUPXER_DISABLE_STATS") == "1"
 
 # ---- Instagram proxy configuration --------------------------------------
-# Default order: toinstagram.com and adamlikes.men (full OG meta tags —
-# media + post/reel title & description) and instagram7.com (backup —
-# embeds image/video via a 302 to the CDN media URL, no title/description).
+# Default order mirrors the Android app v1.6.0 roster: toinstagram.com and
+# adamlikes.men (primaries — full OG meta tags: media + post/reel title &
+# description), then instagram7.com and kkinstagram.com (backups).
 # _ig_probe accepts both styles (full og:image/og:video HTML and image/* or
 # video/* CDN redirects).
 # All proxies are addressed on the bare host (no `www.` prefix). Adamlikes
@@ -102,9 +108,10 @@ STATS_DISABLED: bool = os.environ.get("FIXUPXER_DISABLE_STATS") == "1"
 # _HISTORICAL_IG_HOSTS lists hosts the bot recognises as Instagram so pasted
 # URLs on those (dead/passthrough) proxies still get cleaned and re-hosted
 # onto an active proxy.
-_DEFAULT_IG_PROXIES = ("toinstagram.com", "adamlikes.men", "instagram7.com")
+_DEFAULT_IG_PROXIES = (
+    "toinstagram.com", "adamlikes.men", "instagram7.com", "kkinstagram.com",
+)
 _HISTORICAL_IG_HOSTS = (
-    "kkinstagram.com",
     "eeinstagram.com",
     "ddinstagram.com",
 )
@@ -145,33 +152,6 @@ _IG_CIRCUIT_OPEN_SECONDS: int = 300
 _IG_CIRCUIT_FAIL_THRESHOLD: int = 5
 _IG_CIRCUIT_FAIL_WINDOW: int = 60
 
-# NOTE: These are intentionally a *global* blocklist. The Android app uses
-# per-platform allowlist+blocklist pairs (see plan section 0.3); full parity
-# arrives with the cleaners port (Sprint D). Until then, six functional params
-# the app preserves were removed from this list:
-#   img_index, story_media_id (Instagram), set, notif_id, notif_t (Facebook),
-#   lang (Twitter/X). Removing them avoids breaking Instagram carousels,
-# Facebook photo-sets and notification context, and Twitter language view.
-TRACKING_PARAMS = [
-    's', 't', 'twclid', 'ref_src', 'ref_url', 'cxt', 'src', 'partner', 'medium',
-    'source', 'campaign', 'ref', 'feature', 'vertical', 'linkId', 'attr_userid',
-    # Instagram / generic
-    'igsh', 'igshid', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term',
-    'utm_content', 'fbclid',
-    # Additional X/Twitter edge-cases
-    'variant', 'gar_data_id', 'cn', 'via', 'related', 'hashtags',
-    'original_referer', 'text',
-    # Additional Instagram edge-cases
-    'si', 'h_eid', 'taken-by', 'taken-at',
-    'igid', '_branch_match_id',
-    # Facebook tracking parameters
-    'fb_action_ids', 'fb_action_types', 'fb_ref', 'fb_source', 'mibextid',
-    'extid', 'wtsid', 'rdr', 'hrc', 'refsrc', '_rdr', '_rdc', 'fref', 'pnref',
-    '__tn__', 'eid', 'lst', 'paipv', 'eav', 'hash', 'refid',
-    # Other common marketing/analytics params
-    'ad_id', 'campaign', 'cid', 'clickid', 'ef_id', 'gclid', 'msclkid', 'ttclid', 'yclid',
-]
-
 # Message divider used in templates
 DIVIDER = '───────────────────────'
 
@@ -179,12 +159,37 @@ DIVIDER = '───────────────────────
 PLATFORM_X = 'x'
 PLATFORM_INSTAGRAM = 'instagram'
 PLATFORM_FACEBOOK = 'facebook'
+PLATFORM_TIKTOK = 'tiktok'
 # Used for any host that the cleaner engine touched but for which we don't
-# do a domain rewrite (YouTube, TikTok, Reddit, Amazon, Substack, …).
+# do a domain rewrite (YouTube, Reddit, Amazon, Substack, …).
 PLATFORM_OTHER = 'other'
 
-# Match URLs but exclude common closing punctuation that follows a URL in
-# natural language ("vidi https://x.com/foo." → previously captured the dot).
+# ---- TikTok proxy configuration (mirrors app v1.7.0 Constants.kt) --------
+# Primary proxies embed video + description; backups are fallbacks. Legacy
+# proxies are recognised only so pasted URLs on them get migrated to the
+# active proxy. Unlike Instagram, subdomain prefixes (vm./vt./m./www.) are
+# preserved on rewrite — short-link resolution happens on the same prefix.
+_TIKTOK_PROXY_DOMAINS = ("tnktok.com", "tfxktok.com", "tiktokez.com", "kktiktok.com")
+_TIKTOK_LEGACY_PROXIES = ("vxtiktok.com", "tiktxk.com")
+TIKTOK_PROXY_ORDER: list[str] = _parse_str_csv(
+    os.environ.get("FIXUPXER_TIKTOK_PROXY_ORDER"), _TIKTOK_PROXY_DOMAINS,
+)
+# TikTok embed verification reuses the Instagram probe machinery. Defaults
+# to the FIXUPXER_IG_VERIFY_EMBED setting so one env var disables both
+# (tests/CI only set the IG flag).
+TIKTOK_VERIFY_EMBED: bool = os.environ.get(
+    "FIXUPXER_TIKTOK_VERIFY_EMBED",
+    os.environ.get("FIXUPXER_IG_VERIFY_EMBED", "1"),
+) == "1"
+if TIKTOK_VERIFY_EMBED and (_httpx is None or _cachetools is None):
+    TIKTOK_VERIFY_EMBED = False  # same dependency requirement as the IG check
+# Background-probe path: must be a real, public video every proxy can serve.
+_TT_BG_PROBE_PATH: str = os.environ.get(
+    "FIXUPXER_TIKTOK_BG_PROBE_PATH", "/@cwknix/video/7529264180000509202",
+)
+
+# Grab every http(s) run of non-space characters; trailing prose punctuation
+# ("see https://x.com/foo.") is stripped afterwards by _trim_url_trail.
 URL_PATTERN = re.compile(r'https?://\S+')
 
 # Characters that must be stripped from the end of a captured URL because
@@ -409,29 +414,16 @@ async def _remove_delete_token(chat_id: int, bot_msg_id: int) -> None:
         return
     await asyncio.to_thread(_delete_token_remove_sync, chat_id, bot_msg_id)
 
-# ------------------------ INSTAGRAM PROXY HEALTH ---------------------
+# ------------------------ PROXY EMBED HEALTH -------------------------
 
 # All runtime state below is single-event-loop: no thread synchronization
 # needed because cachetools mutations occur between awaits, never inside
 # preemptive threads.
 _ig_proxy_override: str | None = None  # set by /setproxy <domain>; None means auto
 
-if _cachetools is not None:
-    _ig_url_health: "_cachetools.TTLCache" = _cachetools.TTLCache(
-        maxsize=2000, ttl=IG_HEALTH_TTL_SECONDS,
-    )
-else:
-    _ig_url_health = {}  # fallback: unbounded; only used when verify disabled
-
-# Per-proxy circuit state: {proxy: {state, opened_ts, fails: list[ts]}}
-_ig_circuit: dict[str, dict] = {}
-# Per-(proxy, path) inflight probe Events for thundering-herd dedup.
-_ig_inflight: dict[tuple[str, str], asyncio.Event] = {}
-# Per-proxy event log for /setproxy status (1h window).
-_ig_events: dict[str, "collections.deque[tuple[float, str]]"] = {}
-
-# httpx async client; lazily created so unit tests don't open sockets.
-_ig_http_client: "object | None" = None
+# httpx async client shared by all probes; lazily created so unit tests
+# don't open sockets.
+_probe_http_client: "object | None" = None
 
 # OG meta tag matcher (handles both attribute orderings: property first OR content first).
 _OG_META_PROP_FIRST = re.compile(
@@ -452,83 +444,19 @@ def _log_evt(evt: str, **fields) -> None:
         logger.info("%s %r", evt, fields)
 
 
-def _ig_circuit_get(proxy: str) -> dict:
-    return _ig_circuit.setdefault(
-        proxy, {"state": "closed", "opened_ts": 0.0, "fails": []}
-    )
-
-
-def _ig_circuit_record_fail(proxy: str) -> None:
-    """Record a failure; open the circuit if 5 fails happen within 60 s."""
-    now = time.time()
-    c = _ig_circuit_get(proxy)
-    c["fails"] = [t for t in c["fails"] if now - t <= _IG_CIRCUIT_FAIL_WINDOW]
-    c["fails"].append(now)
-    if len(c["fails"]) >= _IG_CIRCUIT_FAIL_THRESHOLD and c["state"] != "open":
-        c["state"] = "open"
-        c["opened_ts"] = now
-        c["fails"] = []
-        logger.warning("IG proxy %s circuit OPEN (>=5 fails in 60s)", proxy)
-
-
-def _ig_circuit_record_ok(proxy: str) -> None:
-    c = _ig_circuit_get(proxy)
-    if c["state"] != "closed":
-        logger.info("IG proxy %s circuit CLOSED (recovered)", proxy)
-    c["state"] = "closed"
-    c["opened_ts"] = 0.0
-    c["fails"] = []
-
-
-def _ig_circuit_should_skip(proxy: str) -> bool:
-    """Return True if the breaker is open and the cool-down hasn't elapsed."""
-    c = _ig_circuit_get(proxy)
-    if c["state"] != "open":
-        return False
-    if time.time() - c["opened_ts"] >= _IG_CIRCUIT_OPEN_SECONDS:
-        # Half-open: allow next probe to decide.
-        c["state"] = "half_open"
-        return False
-    return True
-
-
-def _ig_record_event(proxy: str, evt: str) -> None:
-    now = time.time()
-    dq = _ig_events.setdefault(proxy, collections.deque(maxlen=2000))
-    dq.append((now, evt))
-    while dq and now - dq[0][0] > 3600:
-        dq.popleft()
-
-
-def _ig_event_counts_1h(proxy: str) -> tuple[int, int]:
-    now = time.time()
-    dq = _ig_events.get(proxy)
-    if not dq:
-        return 0, 0
-    ok = fail = 0
-    for ts, evt in dq:
-        if now - ts > 3600:
-            continue
-        if evt == "ok":
-            ok += 1
-        else:
-            fail += 1
-    return ok, fail
-
-
-async def _ig_get_http_client():
-    global _ig_http_client
-    if _ig_http_client is not None:
-        return _ig_http_client
+async def _get_probe_http_client():
+    global _probe_http_client
+    if _probe_http_client is not None:
+        return _probe_http_client
     if _httpx is None:
         return None
-    _ig_http_client = _httpx.AsyncClient(
+    _probe_http_client = _httpx.AsyncClient(
         timeout=_IG_HTTP_TIMEOUT,
         follow_redirects=True,
         max_redirects=3,
         headers={"User-Agent": _IG_USER_AGENT},
     )
-    return _ig_http_client
+    return _probe_http_client
 
 
 def _has_og_media(text: str) -> str | None:
@@ -540,96 +468,206 @@ def _has_og_media(text: str) -> str | None:
     return None
 
 
-def _ig_cache_get(cache_key: tuple[str, str]) -> dict | None:
-    if _cachetools is None:
-        return None
-    return _ig_url_health.get(cache_key)
+class _ProxyHealthChecker:
+    """Embed-health state for one platform's proxy roster.
 
-
-def _ig_cache_set(
-    cache_key: tuple[str, str],
-    passed: bool,
-    og_url: str | None,
-    final_url: str | None,
-) -> None:
-    if _cachetools is None:
-        return
-    _ig_url_health[cache_key] = {
-        "passed": passed,
-        "og_url": og_url,
-        "final_url": final_url,
-    }
-
-
-async def _ig_probe(proxy: str, path: str) -> tuple[bool, str | None, str | None]:
-    """Probe a (proxy, path) for embed availability.
-
-    Returns (passed, og_media_url_or_None, final_url_after_redirects_or_None).
-    The final URL lets the caller detect when a proxy 302s away to instagram.com
-    (or elsewhere) so we can give Telegram the URL that actually serves OG
-    tags directly, sparing its crawler the same redirect lottery. Result is
-    cached for IG_HEALTH_TTL_SECONDS. Concurrent callers for the same key
-    share the probe via an asyncio.Event (thundering-herd dedup).
+    Bundles the probe result cache (TTL), per-proxy circuit breakers, a 1h
+    event log and thundering-herd dedup. One instance per platform (IG,
+    TikTok) so their health states never interfere.
     """
-    cache_key = (proxy, path)
 
-    cached = _ig_cache_get(cache_key)
-    if cached is not None:
-        return cached["passed"], cached.get("og_url"), cached.get("final_url")
+    def __init__(self, name: str, ttl_seconds: int) -> None:
+        self._name = name  # used in log lines and probe-error events
+        if _cachetools is not None:
+            self._url_health = _cachetools.TTLCache(maxsize=2000, ttl=ttl_seconds)
+        else:
+            self._url_health = {}  # fallback: only used when verify disabled
+        # Per-proxy circuit state: {proxy: {state, opened_ts, fails: list[ts]}}
+        self._circuit: dict[str, dict] = {}
+        # Per-(host, path) inflight probe Events for thundering-herd dedup.
+        self._inflight: dict[tuple[str, str], asyncio.Event] = {}
+        # Per-proxy event log for /setproxy status (1h window).
+        self._events: dict[str, collections.deque] = {}
 
-    inflight = _ig_inflight.get(cache_key)
-    if inflight is not None:
-        await inflight.wait()
-        cached = _ig_cache_get(cache_key)
+    # ---- circuit breaker ----
+
+    def circuit_get(self, proxy: str) -> dict:
+        return self._circuit.setdefault(
+            proxy, {"state": "closed", "opened_ts": 0.0, "fails": []}
+        )
+
+    def circuit_record_fail(self, proxy: str) -> None:
+        """Record a failure; open the circuit if 5 fails happen within 60 s."""
+        now = time.time()
+        c = self.circuit_get(proxy)
+        c["fails"] = [t for t in c["fails"] if now - t <= _IG_CIRCUIT_FAIL_WINDOW]
+        c["fails"].append(now)
+        if len(c["fails"]) >= _IG_CIRCUIT_FAIL_THRESHOLD and c["state"] != "open":
+            c["state"] = "open"
+            c["opened_ts"] = now
+            c["fails"] = []
+            logger.warning(
+                "%s proxy %s circuit OPEN (>=5 fails in 60s)", self._name, proxy,
+            )
+
+    def circuit_record_ok(self, proxy: str) -> None:
+        c = self.circuit_get(proxy)
+        if c["state"] != "closed":
+            logger.info("%s proxy %s circuit CLOSED (recovered)", self._name, proxy)
+        c["state"] = "closed"
+        c["opened_ts"] = 0.0
+        c["fails"] = []
+
+    def circuit_should_skip(self, proxy: str) -> bool:
+        """Return True if the breaker is open and the cool-down hasn't elapsed."""
+        c = self.circuit_get(proxy)
+        if c["state"] != "open":
+            return False
+        if time.time() - c["opened_ts"] >= _IG_CIRCUIT_OPEN_SECONDS:
+            # Half-open: allow next probe to decide.
+            c["state"] = "half_open"
+            return False
+        return True
+
+    # ---- event log ----
+
+    def record_event(self, proxy: str, evt: str) -> None:
+        now = time.time()
+        dq = self._events.setdefault(proxy, collections.deque(maxlen=2000))
+        dq.append((now, evt))
+        while dq and now - dq[0][0] > 3600:
+            dq.popleft()
+
+    def event_counts_1h(self, proxy: str) -> tuple[int, int]:
+        now = time.time()
+        dq = self._events.get(proxy)
+        if not dq:
+            return 0, 0
+        ok = fail = 0
+        for ts, evt in dq:
+            if now - ts > 3600:
+                continue
+            if evt == "ok":
+                ok += 1
+            else:
+                fail += 1
+        return ok, fail
+
+    # ---- probe cache ----
+
+    def _cache_get(self, cache_key: tuple[str, str]) -> dict | None:
+        if _cachetools is None:
+            return None
+        return self._url_health.get(cache_key)
+
+    def _cache_set(
+        self,
+        cache_key: tuple[str, str],
+        passed: bool,
+        og_url: str | None,
+        final_url: str | None,
+    ) -> None:
+        if _cachetools is None:
+            return
+        self._url_health[cache_key] = {
+            "passed": passed,
+            "og_url": og_url,
+            "final_url": final_url,
+        }
+
+    # ---- probe ----
+
+    async def probe(
+        self, proxy: str, path: str, host: str | None = None,
+    ) -> tuple[bool, str | None, str | None]:
+        """Probe a proxy for embed availability at ``path``.
+
+        ``host`` is the actual hostname to request (defaults to ``proxy``);
+        TikTok passes e.g. ``vm.tnktok.com`` while the circuit breaker stays
+        keyed on the bare proxy. Returns (passed, og_media_url_or_None,
+        final_url_after_redirects_or_None). The final URL lets the caller
+        detect when a proxy 302s away to the origin site so it can prefer a
+        proxy that serves the embed itself. Result is cached for the checker's
+        TTL. Concurrent callers for the same key share the probe via an
+        asyncio.Event (thundering-herd dedup).
+        """
+        host = host or proxy
+        cache_key = (host, path)
+
+        cached = self._cache_get(cache_key)
         if cached is not None:
             return cached["passed"], cached.get("og_url"), cached.get("final_url")
-        return False, None, None
 
-    event = asyncio.Event()
-    _ig_inflight[cache_key] = event
-    try:
-        url = f"https://{proxy}{path}"
-        passed = False
-        og_url: str | None = None
-        final_url: str | None = None
-        client = await _ig_get_http_client()
-        if client is None:
+        inflight = self._inflight.get(cache_key)
+        if inflight is not None:
+            await inflight.wait()
+            cached = self._cache_get(cache_key)
+            if cached is not None:
+                return cached["passed"], cached.get("og_url"), cached.get("final_url")
             return False, None, None
+
+        event = asyncio.Event()
+        self._inflight[cache_key] = event
         try:
-            response = await client.get(url)
-            final_url = str(response.url)
-            if response.status_code in (200, 206):
-                ct = response.headers.get("content-type", "").lower()
-                if ct.startswith("image/") or ct.startswith("video/"):
-                    # Proxy 302'd to raw CDN media (e.g. instagram7.com →
-                    # scontent.cdninstagram.com/X.jpg). Telegram still renders
-                    # an image preview when crawling the proxy URL, so treat
-                    # this as a successful embed. We pin final_url back to the
-                    # proxy URL so the caller's served_by_proxy check keeps
-                    # the user-facing URL on the proxy (avoiding leaking the
-                    # signed CDN URL with a short TTL).
-                    og_url = final_url
-                    final_url = url
-                    passed = True
-                else:
-                    text = response.text[:_IG_MAX_BYTES]
-                    og_url = _has_og_media(text)
-                    passed = og_url is not None
-        except Exception as e:  # noqa: BLE001 - any failure = proxy didn't serve
-            _log_evt("ig_probe_error", proxy=proxy, path=path, error=str(e))
+            url = f"https://{host}{path}"
+            passed = False
+            og_url: str | None = None
+            final_url: str | None = None
+            client = await _get_probe_http_client()
+            if client is None:
+                return False, None, None
+            try:
+                response = await client.get(url)
+                final_url = str(response.url)
+                if response.status_code in (200, 206):
+                    ct = response.headers.get("content-type", "").lower()
+                    if ct.startswith("image/") or ct.startswith("video/"):
+                        # Proxy 302'd to raw CDN media (e.g. instagram7.com →
+                        # scontent.cdninstagram.com/X.jpg). Telegram still
+                        # renders an image preview when crawling the proxy URL,
+                        # so treat this as a successful embed. We pin final_url
+                        # back to the proxy URL so the caller's served_by_proxy
+                        # check keeps the user-facing URL on the proxy (avoiding
+                        # leaking the signed CDN URL with a short TTL).
+                        og_url = final_url
+                        final_url = url
+                        passed = True
+                    else:
+                        text = response.text[:_IG_MAX_BYTES]
+                        og_url = _has_og_media(text)
+                        passed = og_url is not None
+            except Exception as e:  # noqa: BLE001 - any failure = proxy didn't serve
+                _log_evt(
+                    f"{self._name}_probe_error", proxy=proxy, path=path, error=str(e),
+                )
 
-        if passed:
-            _ig_circuit_record_ok(proxy)
-            _ig_record_event(proxy, "ok")
-        else:
-            _ig_circuit_record_fail(proxy)
-            _ig_record_event(proxy, "fail")
+            if passed:
+                self.circuit_record_ok(proxy)
+                self.record_event(proxy, "ok")
+            else:
+                self.circuit_record_fail(proxy)
+                self.record_event(proxy, "fail")
 
-        _ig_cache_set(cache_key, passed, og_url, final_url)
-        return passed, og_url, final_url
-    finally:
-        event.set()
-        _ig_inflight.pop(cache_key, None)
+            self._cache_set(cache_key, passed, og_url, final_url)
+            return passed, og_url, final_url
+        finally:
+            event.set()
+            self._inflight.pop(cache_key, None)
+
+
+_IG_HEALTH = _ProxyHealthChecker("ig", IG_HEALTH_TTL_SECONDS)
+_TT_HEALTH = _ProxyHealthChecker("tiktok", IG_HEALTH_TTL_SECONDS)
+
+
+# Module-level wrappers keep call sites (and test monkeypatching) simple.
+async def _ig_probe(proxy: str, path: str) -> tuple[bool, str | None, str | None]:
+    return await _IG_HEALTH.probe(proxy, path)
+
+
+async def _tt_probe(
+    proxy: str, path: str, host: str | None = None,
+) -> tuple[bool, str | None, str | None]:
+    return await _TT_HEALTH.probe(proxy, path, host=host)
 
 
 def _instagram_url_with_proxy(clean_url: str, proxy: str) -> str:
@@ -785,7 +823,7 @@ async def _convert_instagram_async(url: str) -> tuple[str | None, str]:
     if _ig_proxy_override is not None:
         candidates: list[str] = [_ig_proxy_override]
     else:
-        candidates = [p for p in IG_PROXY_ORDER if not _ig_circuit_should_skip(p)]
+        candidates = [p for p in IG_PROXY_ORDER if not _IG_HEALTH.circuit_should_skip(p)]
         if not candidates:
             # Every breaker open — try them all in half-open state.
             candidates = list(IG_PROXY_ORDER)
@@ -800,40 +838,58 @@ async def _convert_instagram_async(url: str) -> tuple[str | None, str]:
         return fixed, (None if fixed == clean_original else clean_original)
 
     last_error: str | None = None
+    # A proxy that "passed" only via a redirect back to instagram.com is a
+    # weak result: Telegram does not render embeds for plain instagram.com
+    # links, so prefer any proxy that serves the embed itself and keep the
+    # redirect target only as a last-resort fallback.
+    redirect_fallback: tuple[str, str, str | None] | None = None  # (fixed, proxy, og)
     for proxy in candidates:
         try:
             passed, og_url, final_url = await _ig_probe(proxy, path)
-            if passed:
-                # Detect whether the proxy actually served the embed itself or
-                # 302'd back to instagram.com. If it redirected away, give
-                # Telegram the final URL directly — its crawler otherwise has
-                # to chase the same redirect chain and often gives up,
-                # producing no preview card even though og:image is reachable.
-                served_by_proxy = True
-                if final_url:
-                    final_host = urllib.parse.urlparse(final_url).netloc.lower()
-                    final_bare = (
-                        final_host[4:] if final_host.startswith("www.") else final_host
-                    )
-                    served_by_proxy = (
-                        final_bare == proxy or final_bare.endswith("." + proxy)
-                    )
-                if served_by_proxy:
-                    fixed = _instagram_url_with_proxy(clean_original, proxy)
-                else:
-                    fixed = final_url or _instagram_url_with_proxy(clean_original, proxy)
+            if not passed:
+                continue
+            # Detect whether the proxy actually served the embed itself or
+            # 302'd back to instagram.com (common for /reel/ paths).
+            served_by_proxy = True
+            if final_url:
+                final_host = urllib.parse.urlparse(final_url).netloc.lower()
+                final_bare = (
+                    final_host[4:] if final_host.startswith("www.") else final_host
+                )
+                served_by_proxy = (
+                    final_bare == proxy or final_bare.endswith("." + proxy)
+                )
+            if served_by_proxy:
+                fixed = _instagram_url_with_proxy(clean_original, proxy)
                 _log_evt(
                     "ig_convert",
                     proxy=proxy,
                     og=og_url,
                     url=clean_original,
                     fixed=fixed,
-                    served_by_proxy=served_by_proxy,
+                    served_by_proxy=True,
                 )
                 return fixed, clean_original
+            if redirect_fallback is None:
+                fallback_url = final_url or _instagram_url_with_proxy(
+                    clean_original, proxy,
+                )
+                redirect_fallback = (fallback_url, proxy, og_url)
         except Exception as e:  # noqa: BLE001
             last_error = str(e)
             logger.warning("IG proxy %s probe failed: %s", proxy, e)
+
+    if redirect_fallback is not None:
+        fixed, proxy, og_url = redirect_fallback
+        _log_evt(
+            "ig_convert",
+            proxy=proxy,
+            og=og_url,
+            url=clean_original,
+            fixed=fixed,
+            served_by_proxy=False,
+        )
+        return fixed, clean_original
 
     _log_evt(
         "ig_all_fail",
@@ -865,6 +921,118 @@ def _convert_facebook(url: str):
     ))
     return fixed, cleaned_url
 
+
+async def _convert_tiktok_async(url: str) -> tuple[str | None, str]:
+    """Return (fixed_url, clean_url) for TikTok links (app v1.7.0 parity).
+
+    tiktok.com hosts are rewritten to the healthiest proxy from
+    TIKTOK_PROXY_ORDER with the subdomain prefix preserved (vm.tiktok.com →
+    vm.tnktok.com). Same health policy as Instagram: each candidate is probed
+    (with the user's actual path) before the message is sent, a proxy that
+    merely redirects back to tiktok.com is only a last-resort fallback, and
+    if *every* proxy fails the caller gets (None, clean_url) — log + skip,
+    original message stays.
+
+    URLs already on a current proxy are cleaned only (clean_url=None); URLs
+    on a legacy proxy (vxtiktok/tiktxk) are migrated to a healthy proxy,
+    with the fallback link normalised back to tiktok.com.
+    """
+    cleaned_url = _clean_query(url)
+    parsed = urllib.parse.urlparse(cleaned_url)
+    domain = parsed.netloc.lower()
+    path = parsed.path or "/"
+
+    known_proxies = tuple(TIKTOK_PROXY_ORDER) + _TIKTOK_PROXY_DOMAINS
+    if any(domain == p or domain.endswith("." + p) for p in known_proxies):
+        return cleaned_url, None
+
+    source = next(
+        (h for h in ("tiktok.com",) + _TIKTOK_LEGACY_PROXIES
+         if domain == h or domain.endswith("." + h)),
+        None,
+    )
+    if source is None:
+        return cleaned_url, cleaned_url  # defensive fallback
+
+    prefix = domain[: -len(source)]  # "" or "vm." / "vt." / "www." / …
+
+    def _swap_host(new_host: str) -> str:
+        return urllib.parse.urlunparse((
+            parsed.scheme or "https",
+            new_host,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        ))
+
+    if source != "tiktok.com":
+        # Legacy-proxy input: the fallback link must point at tiktok.com,
+        # not at the dead legacy host.
+        cleaned_url = _swap_host(prefix + "tiktok.com")
+
+    candidates = [p for p in TIKTOK_PROXY_ORDER if not _TT_HEALTH.circuit_should_skip(p)]
+    if not candidates:
+        # Every breaker open — try them all in half-open state.
+        candidates = list(TIKTOK_PROXY_ORDER)
+
+    if not TIKTOK_VERIFY_EMBED:
+        return _swap_host(prefix + candidates[0]), cleaned_url
+
+    last_error: str | None = None
+    redirect_fallback: tuple[str, str, str | None] | None = None
+    for proxy in candidates:
+        host = prefix + proxy
+        try:
+            passed, og_url, final_url = await _tt_probe(proxy, path, host=host)
+            if not passed:
+                continue
+            served_by_proxy = True
+            if final_url:
+                final_host = urllib.parse.urlparse(final_url).netloc.lower()
+                final_bare = (
+                    final_host[4:] if final_host.startswith("www.") else final_host
+                )
+                served_by_proxy = (
+                    final_bare == proxy or final_bare.endswith("." + proxy)
+                )
+            if served_by_proxy:
+                fixed = _swap_host(host)
+                _log_evt(
+                    "tiktok_convert",
+                    proxy=proxy,
+                    og=og_url,
+                    url=cleaned_url,
+                    fixed=fixed,
+                    served_by_proxy=True,
+                )
+                return fixed, cleaned_url
+            if redirect_fallback is None:
+                redirect_fallback = (final_url or _swap_host(host), proxy, og_url)
+        except Exception as e:  # noqa: BLE001
+            last_error = str(e)
+            logger.warning("TikTok proxy %s probe failed: %s", proxy, e)
+
+    if redirect_fallback is not None:
+        fixed, proxy, og_url = redirect_fallback
+        _log_evt(
+            "tiktok_convert",
+            proxy=proxy,
+            og=og_url,
+            url=cleaned_url,
+            fixed=fixed,
+            served_by_proxy=False,
+        )
+        return fixed, cleaned_url
+
+    _log_evt(
+        "tiktok_all_fail",
+        tried=candidates,
+        url=cleaned_url,
+        last_error=last_error,
+    )
+    return None, cleaned_url
+
 # ------------------------ MESSAGE BUILDER ----------------------------
 
 # Helper to escape Telegram Markdown V2 special characters
@@ -873,6 +1041,15 @@ def escape_markdown(text: str) -> str:
         return ''
     # Escape all Telegram MarkdownV2 special characters
     return re.sub(r'([_\*\[\]\(\)~`>#+\-=|{}.!])', r'\\\1', text)
+
+
+def _escape_md_url(url: str) -> str:
+    """Escape the two characters that break a MarkdownV2 inline-link URL.
+
+    Without this, URLs containing ')' (e.g. Wikipedia article titles) make
+    Telegram reject the whole message with BadRequest.
+    """
+    return url.replace("\\", "\\\\").replace(")", "\\)")
 
 def _build_message(platform: str, username: str, fixed_url: str, clean_url: str | None, original_url: str, user_text: str = "") -> str:
     """Generate the final Telegram message according to platform template, escaping Markdown entities."""
@@ -902,9 +1079,9 @@ def _build_message(platform: str, username: str, fixed_url: str, clean_url: str 
     label_original = escape_markdown("⛔ Original (dirty) URL")
 
     # Assemble hyperlink strings (URLs must escape only ')' and '\\' inside)
-    fixed_link = f"[{label_fixed}]({fixed_url})"
-    clean_link = f"[{label_clean}]({clean_url})" if clean_url else None
-    original_link = f"[{label_original}]({original_url})"
+    fixed_link = f"[{label_fixed}]({_escape_md_url(fixed_url)})"
+    clean_link = f"[{label_clean}]({_escape_md_url(clean_url)})" if clean_url else None
+    original_link = f"[{label_original}]({_escape_md_url(original_url)})"
 
     # Combine links with single newline
     links = [fixed_link]
@@ -931,6 +1108,9 @@ _X_HOSTS = ("x.com", "twitter.com", "fixupx.com", "fxtwitter.com", "vxtwitter.co
 # to a working one in _convert_instagram_async.
 _INSTAGRAM_HOSTS = ("instagram.com",) + tuple(IG_PROXY_ORDER) + _HISTORICAL_IG_HOSTS
 _FACEBOOK_HOSTS = ("facebook.com", "fb.com", "fb.watch")
+# NOTE: suffix matching means "kktiktok.com" does NOT accidentally match
+# "tiktok.com" (no "." boundary) — each proxy must be listed explicitly.
+_TIKTOK_HOSTS = ("tiktok.com",) + _TIKTOK_PROXY_DOMAINS + _TIKTOK_LEGACY_PROXIES
 
 
 def _host_matches(domain: str, hosts: tuple[str, ...]) -> bool:
@@ -945,6 +1125,8 @@ def _identify_platform(domain: str) -> str | None:
         return PLATFORM_INSTAGRAM
     if _host_matches(domain, _FACEBOOK_HOSTS):
         return PLATFORM_FACEBOOK
+    if _host_matches(domain, _TIKTOK_HOSTS):
+        return PLATFORM_TIKTOK
     return None
 
 # ------------------------ MAIN CONVERSION ENTRY ----------------------
@@ -953,8 +1135,8 @@ async def convert_supported_url(url: str):
     """Detect platform and return (platform, fixed_url, clean_url).
 
     Mirrors the Android app's UrlProcessor: every URL is run through the
-    cleaner engine; X / Instagram / Facebook additionally get a domain
-    rewrite. Other platforms (YouTube, TikTok, Reddit, Amazon, Substack, …)
+    cleaner engine; X / Instagram / Facebook / TikTok additionally get a
+    domain rewrite. Other platforms (YouTube, Reddit, Amazon, Substack, …)
     fall into the PLATFORM_OTHER branch which only strips tracking.
 
     Return contract:
@@ -962,11 +1144,11 @@ async def convert_supported_url(url: str):
                                     convert-platform; caller skips it.
         (PLATFORM_OTHER, c, None) — cleaning removed at least one param;
                                     the bot posts the cleaned URL.
-        (PLATFORM_X|IG|FB, f, c)  — domain rewrite happened; ``c`` may be
-                                    None when the input was already on the
+        (PLATFORM_X|IG|FB|TIKTOK, f, c) — domain rewrite happened; ``c`` may
+                                    be None when the input was already on the
                                     proxy (avoids duplicate links).
-        (PLATFORM_INSTAGRAM, None, c) — Instagram all-fail (every proxy
-                                    failed health check); caller logs and
+        (PLATFORM_INSTAGRAM|TIKTOK, None, c) — all-fail (every proxy failed
+                                    the embed health check); caller logs and
                                     leaves the original message intact.
     """
     parsed = urllib.parse.urlparse(url)
@@ -986,6 +1168,11 @@ async def convert_supported_url(url: str):
         if fixed == url and clean is None:
             return None, None, None
         return platform, fixed, clean
+    if platform == PLATFORM_TIKTOK:
+        fixed, clean = await _convert_tiktok_async(url)
+        if fixed == url and clean is None:
+            return None, None, None
+        return platform, fixed, clean
 
     # Any other host: run the cleaner engine. If it didn't change the URL,
     # the bot has nothing useful to add → skip silently.
@@ -996,11 +1183,14 @@ async def convert_supported_url(url: str):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
+    if update.message is None:
+        return  # e.g. channel post or edited message
     await update.message.reply_text(
         "🤖 <b>Hi! I'm FixupXer bot.</b>\n\n"
         "I automatically <b>clean</b> tracking parameters and <b>convert</b> social-media links so they embed beautifully in Telegram.\n\n"
         "🔄 <b>X/Twitter</b>: x.com / twitter.com → fixupx.com / fxtwitter.com\n"
-        "📸 <b>Instagram</b>: instagram.com → kkinstagram.com\n"
+        "📸 <b>Instagram</b>: instagram.com → healthiest embed proxy (toinstagram.com, adamlikes.men, …)\n"
+        "🎵 <b>TikTok</b>: tiktok.com → tnktok.com\n"
         "📘 <b>Facebook</b>: facebook.com → facebookez.com\n\n"
         "⚠️ <b>Heads-up</b>: Facebook often hides extra tracking behind secondary links that only activate after clicking on a primary link, so cleaning in most cases is impossible.\n\n"
         "Add me to your group and I'll take care of every supported link automatically.\n\n"
@@ -1010,6 +1200,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
+    if update.message is None:
+        return
     await update.message.reply_text(
         "📝 <b>FixupXer bot – Help</b>\n\n"
         "Simply add me to any chat. Whenever someone posts a supported link, I'll: \n"
@@ -1017,7 +1209,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "2. Repost a cleaned & converted version with proper embeds.\n\n"
         "<b>Supported platforms</b>:\n"
         "🔄 <b>X/Twitter</b>: x.com / twitter.com → fixupx.com / fxtwitter.com\n"
-        "📸 <b>Instagram</b>: instagram.com → kkinstagram.com\n"
+        "📸 <b>Instagram</b>: instagram.com → healthiest embed proxy (toinstagram.com, adamlikes.men, …)\n"
+        "🎵 <b>TikTok</b>: tiktok.com → tnktok.com\n"
         "📘 <b>Facebook</b>: facebook.com → facebookez.com\n\n"
         "⚠️ <b>Note</b>: Facebook may still attach hidden tracking after click – I strip everything I can see.\n\n"
         "<b>Commands</b>:\n"
@@ -1064,6 +1257,8 @@ def _stats_query_sync() -> dict:
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show bot usage statistics to authorized users."""
+    if update.message is None or update.message.from_user is None:
+        return
     user_id = update.message.from_user.id
     if user_id not in BOT_ADMINS:
         await update.message.reply_text("You are not authorized to view bot statistics.")
@@ -1120,12 +1315,15 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     SQLite ``delete_tokens`` table so /delete keeps working across bot
     restarts.
     """
-    if not update.message.reply_to_message or not update.message.reply_to_message.from_user.is_bot:
-        return  # /delete must reply to a bot message.
+    if update.message is None or not update.message.reply_to_message:
+        return  # /delete must reply to a message.
+    replied = update.message.reply_to_message
+    if replied.from_user is None or replied.from_user.id != context.bot.id:
+        return  # Only this bot's own reposts can be /delete'd.
 
     user_id = update.message.from_user.id
     chat_id = update.effective_chat.id
-    bot_message_id = update.message.reply_to_message.message_id
+    bot_message_id = replied.message_id
 
     try:
         chat_member = await context.bot.get_chat_member(chat_id, user_id)
@@ -1180,6 +1378,8 @@ async def setproxy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
       /setproxy status     show health table for all proxies
     """
     global _ig_proxy_override
+    if update.message is None or update.message.from_user is None:
+        return
     user_id = update.message.from_user.id
     if user_id not in BOT_ADMINS:
         return  # Silent no-op for non-admins.
@@ -1198,10 +1398,9 @@ async def setproxy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     sub = args[0].strip().lower()
 
     if sub == "status":
-        rows = ["Proxy           State       Last 1h ok/fail"]
-        for proxy in IG_PROXY_ORDER:
-            c = _ig_circuit_get(proxy)
-            ok, fail = _ig_event_counts_1h(proxy)
+        def _status_row(hc: _ProxyHealthChecker, proxy: str) -> str:
+            c = hc.circuit_get(proxy)
+            ok, fail = hc.event_counts_1h(proxy)
             state = c["state"]
             if state == "open":
                 remaining = max(
@@ -1209,8 +1408,14 @@ async def setproxy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     _IG_CIRCUIT_OPEN_SECONDS - int(time.time() - c["opened_ts"]),
                 )
                 state = f"open({remaining}s)"
-            rows.append(f"{proxy:<16}{state:<12}{ok}/{fail}")
+            return f"{proxy:<16}{state:<12}{ok}/{fail}"
+
+        rows = ["Instagram       State       Last 1h ok/fail"]
+        rows.extend(_status_row(_IG_HEALTH, p) for p in IG_PROXY_ORDER)
         rows.append(f"Override: {_ig_proxy_override or 'auto'}")
+        rows.append("")
+        rows.append("TikTok          State       Last 1h ok/fail")
+        rows.extend(_status_row(_TT_HEALTH, p) for p in TIKTOK_PROXY_ORDER)
         body = "\n".join(rows)
         await update.message.reply_text(
             f"<pre>{html_escape(body)}</pre>", parse_mode="HTML",
@@ -1233,15 +1438,20 @@ async def setproxy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text(f"Override set to {sub}.")
 
 
-async def _ig_background_probe(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _background_probe(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Periodic per-proxy probe used to close circuit breakers proactively."""
-    if not IG_VERIFY_EMBED:
-        return
-    for proxy in IG_PROXY_ORDER:
-        try:
-            await _ig_probe(proxy, _IG_BG_PROBE_PATH)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Background probe of %s failed: %s", proxy, e)
+    if IG_VERIFY_EMBED:
+        for proxy in IG_PROXY_ORDER:
+            try:
+                await _ig_probe(proxy, _IG_BG_PROBE_PATH)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Background probe of %s failed: %s", proxy, e)
+    if TIKTOK_VERIFY_EMBED:
+        for proxy in TIKTOK_PROXY_ORDER:
+            try:
+                await _tt_probe(proxy, _TT_BG_PROBE_PATH)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Background probe of %s failed: %s", proxy, e)
 
 
 _MAX_URLS_PER_MESSAGE = 3
@@ -1255,18 +1465,18 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     single combined reply would only preview the first link). The original
     message is deleted after at least one successful conversion.
     """
+    if update.message is None:
+        return  # Edited messages / channel posts are intentionally ignored.
     message = update.message.text
     if not message:
         return
 
-    if update.message.from_user.is_bot:
+    if update.message.from_user is None or update.message.from_user.is_bot:
         return
 
-    await track_user(update.message.from_user)
-    await track_chat(update.effective_chat)
-
     raw_candidates = URL_PATTERN.findall(message)
-    candidates = [_trim_url_trail(c) for c in raw_candidates]
+    # Order-preserving dedupe: the same URL pasted twice gets one reply.
+    candidates = list(dict.fromkeys(_trim_url_trail(c) for c in raw_candidates))
     if not candidates:
         return
 
@@ -1276,6 +1486,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     sent_count = 0
     user_text_attached = False
+    stats_tracked = False
     for candidate in candidates:
         if sent_count >= _MAX_URLS_PER_MESSAGE:
             break
@@ -1284,10 +1495,11 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if platform is None:
             continue
         if fixed_url is None:
-            # Instagram all-fail: log + skip (do not send replacement, do not
-            # delete original — see plan section 0.2 "all-fail policy").
+            # All proxies failed the embed health check: log + skip (do not
+            # send replacement, do not delete original — "all-fail policy").
             logger.warning(
-                "Instagram all-fail for %s; leaving original message intact.",
+                "%s all-fail for %s; leaving original message intact.",
+                platform,
                 candidate,
             )
             continue
@@ -1335,6 +1547,13 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         user_message_map[bot_message.message_id] = user.id
         await _save_delete_token(bot_message.message_id, chat_id, user.id)
+        if not stats_tracked:
+            # Lazy stats tracking: users/chats are recorded only when they
+            # actually trigger a conversion (matches the README's stats
+            # semantics; messages without conversions cost zero DB writes).
+            await track_user(user)
+            await track_chat(update.effective_chat)
+            stats_tracked = True
         # Privacy: store only the cleaned URL (no tracking tokens) in stats.
         await track_conversion(user.id, chat_id, clean_url or fixed_url, fixed_url)
 
@@ -1362,15 +1581,28 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except TelegramError as e:
         logger.warning("TelegramError when deleting original: %s", e)
 
+async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Central PTB error handler.
+
+    Transport-level noise (polling conflicts, transient network errors) gets
+    one warning line; anything else keeps the full traceback.
+    """
+    err = context.error
+    if isinstance(err, (Conflict, NetworkError)):
+        logger.warning("Telegram transport error: %s", err)
+        return
+    logger.error("Unhandled error while processing an update", exc_info=err)
+
+
 async def _post_shutdown(_application) -> None:
     """Close httpx and run a SQLite WAL checkpoint on shutdown."""
-    global _ig_http_client
-    if _ig_http_client is not None:
+    global _probe_http_client
+    if _probe_http_client is not None:
         try:
-            await _ig_http_client.aclose()
+            await _probe_http_client.aclose()
         except Exception as e:  # noqa: BLE001
             logger.warning("Error closing httpx client: %s", e)
-        _ig_http_client = None
+        _probe_http_client = None
     if not STATS_DISABLED:
         try:
             await asyncio.to_thread(_wal_checkpoint_sync)
@@ -1405,6 +1637,7 @@ def main() -> None:
         .build()
     )
 
+    application.add_error_handler(_on_error)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("delete", delete_command))
@@ -1412,14 +1645,14 @@ def main() -> None:
     application.add_handler(CommandHandler("setproxy", setproxy_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_message))
 
-    # Periodic IG probe closes circuit breakers without waiting for real
-    # traffic. Disabled when IG_VERIFY_EMBED is off.
-    if IG_VERIFY_EMBED and IG_PROBE_INTERVAL_SECONDS > 0:
+    # Periodic proxy probe (IG + TikTok) closes circuit breakers without
+    # waiting for real traffic. Disabled when both verify flags are off.
+    if (IG_VERIFY_EMBED or TIKTOK_VERIFY_EMBED) and IG_PROBE_INTERVAL_SECONDS > 0:
         application.job_queue.run_repeating(
-            _ig_background_probe,
+            _background_probe,
             interval=IG_PROBE_INTERVAL_SECONDS,
             first=10.0,
-            name="ig_background_probe",
+            name="proxy_background_probe",
         )
 
     mode = os.environ.get("FIXUPXER_MODE", "polling").strip().lower()

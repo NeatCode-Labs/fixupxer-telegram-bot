@@ -49,7 +49,13 @@ _PRESERVE = frozenset({
 TikTokCleaner = AggressiveCleaner(
     id="tiktok",
     category=CleanerCategory.SOCIAL_MEDIA,
-    domains=("tiktok.com", "tiktokcdn.com", "tiktokv.com"),
+    domains=(
+        "tiktok.com", "tiktokcdn.com", "tiktokv.com",
+        # Embed proxies (app v1.7.0) + legacy proxies, so pasted proxy URLs
+        # get their tracking stripped too.
+        "tnktok.com", "tfxktok.com", "tiktokez.com", "kktiktok.com",
+        "vxtiktok.com", "tiktxk.com",
+    ),
     tracking=_TRACKING,
     preserve=_PRESERVE,
 )

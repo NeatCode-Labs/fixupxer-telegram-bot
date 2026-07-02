@@ -37,6 +37,11 @@ def _run(coro):
         ("fb.com", bot.PLATFORM_FACEBOOK),
         ("fb.watch", bot.PLATFORM_FACEBOOK),
         ("m.facebook.com", bot.PLATFORM_FACEBOOK),
+        ("tiktok.com", bot.PLATFORM_TIKTOK),
+        ("vm.tiktok.com", bot.PLATFORM_TIKTOK),
+        ("tnktok.com", bot.PLATFORM_TIKTOK),
+        ("kktiktok.com", bot.PLATFORM_TIKTOK),
+        ("vxtiktok.com", bot.PLATFORM_TIKTOK),
         # Substring false-positives must NOT match.
         ("maxx.com", None),
         ("fakeinstagram.scam.com", None),
@@ -105,10 +110,10 @@ def test_convert_instagram_uses_first_proxy_when_verify_off() -> None:
 def test_convert_instagram_rewrites_historical_proxy() -> None:
     """A URL on a dead historical proxy gets re-hosted onto an active one."""
     p, fixed, clean = _run(bot.convert_supported_url(
-        "https://www.kkinstagram.com/p/ABC/?igsh=spam",
+        "https://www.eeinstagram.com/p/ABC/?igsh=spam",
     ))
     assert p == bot.PLATFORM_INSTAGRAM
-    assert "kkinstagram.com" not in fixed
+    assert "eeinstagram.com" not in fixed
     assert "igsh" not in fixed
     assert bot._DEFAULT_IG_PROXIES[0] in fixed
 
@@ -135,6 +140,124 @@ def test_convert_instagram_emits_bare_host_for_default_proxy() -> None:
     proxy = bot._DEFAULT_IG_PROXIES[0]
     assert f"://{proxy}/" in fixed
     assert f"www.{proxy}" not in fixed
+
+
+def test_convert_tiktok_rewrites_and_preserves_subdomain() -> None:
+    p, fixed, clean = _run(bot.convert_supported_url(
+        "https://www.tiktok.com/@user/video/123?_r=1&lang=en",
+    ))
+    assert p == bot.PLATFORM_TIKTOK
+    assert "www.tnktok.com" in fixed
+    assert "lang=en" in fixed
+    assert "_r=1" not in fixed
+    assert clean is not None and "tiktok.com" in clean
+
+
+def test_convert_tiktok_short_link_keeps_vm_prefix() -> None:
+    p, fixed, clean = _run(bot.convert_supported_url(
+        "https://vm.tiktok.com/ZMabcdef/",
+    ))
+    assert p == bot.PLATFORM_TIKTOK
+    assert fixed == "https://vm.tnktok.com/ZMabcdef/"
+    assert clean == "https://vm.tiktok.com/ZMabcdef/"
+
+
+def test_convert_tiktok_migrates_legacy_proxy() -> None:
+    p, fixed, clean = _run(bot.convert_supported_url(
+        "https://vxtiktok.com/@user/video/123",
+    ))
+    assert p == bot.PLATFORM_TIKTOK
+    assert "tnktok.com" in fixed
+    # Fallback link must point at tiktok.com, not the dead legacy proxy.
+    assert clean == "https://tiktok.com/@user/video/123"
+
+
+def test_convert_tiktok_already_on_proxy_cleans_only() -> None:
+    p, fixed, clean = _run(bot.convert_supported_url(
+        "https://tnktok.com/@user/video/123?_r=1",
+    ))
+    assert p == bot.PLATFORM_TIKTOK
+    assert "tnktok.com" in fixed
+    assert "_r=1" not in fixed
+    assert clean is None
+
+
+def test_convert_tiktok_already_clean_on_proxy_is_noop() -> None:
+    p, fixed, clean = _run(bot.convert_supported_url(
+        "https://tnktok.com/@user/video/123",
+    ))
+    assert (p, fixed, clean) == (None, None, None)
+
+
+def test_tiktok_prefers_healthy_proxy(monkeypatch) -> None:
+    """When the first TikTok proxy fails its probe, the next healthy one is
+    used — with the subdomain prefix preserved on the probed host."""
+    first, second = bot.TIKTOK_PROXY_ORDER[0], bot.TIKTOK_PROXY_ORDER[1]
+    probed_hosts: list[str] = []
+
+    async def fake_probe(proxy, path, host=None):
+        probed_hosts.append(host or proxy)
+        if proxy == first:
+            return False, None, None
+        return True, "og-url", f"https://{host or proxy}{path}"
+
+    monkeypatch.setattr(bot, "TIKTOK_VERIFY_EMBED", True)
+    monkeypatch.setattr(bot, "_tt_probe", fake_probe)
+    p, fixed, clean = _run(bot.convert_supported_url(
+        "https://www.tiktok.com/@user/video/123",
+    ))
+    assert p == bot.PLATFORM_TIKTOK
+    assert f"www.{second}" in fixed
+    assert probed_hosts == [f"www.{first}", f"www.{second}"]
+
+
+def test_tiktok_all_fail_returns_none_fixed(monkeypatch) -> None:
+    async def fake_probe(proxy, path, host=None):
+        return False, None, None
+
+    monkeypatch.setattr(bot, "TIKTOK_VERIFY_EMBED", True)
+    monkeypatch.setattr(bot, "_tt_probe", fake_probe)
+    p, fixed, clean = _run(bot.convert_supported_url(
+        "https://www.tiktok.com/@user/video/123",
+    ))
+    assert p == bot.PLATFORM_TIKTOK
+    assert fixed is None
+    assert clean == "https://www.tiktok.com/@user/video/123"
+
+
+# ---- Instagram proxy selection (probe mocked) --------------------------------
+
+def test_ig_prefers_direct_serving_proxy_over_redirect(monkeypatch) -> None:
+    """A proxy that 302s back to instagram.com must lose to one that serves
+    the embed itself (plain instagram.com links don't embed in Telegram)."""
+    first, second = bot.IG_PROXY_ORDER[0], bot.IG_PROXY_ORDER[1]
+
+    async def fake_probe(proxy, path):
+        if proxy == first:
+            return True, "og-url", f"https://www.instagram.com{path}"
+        return True, "og-url", f"https://{proxy}{path}"
+
+    monkeypatch.setattr(bot, "IG_VERIFY_EMBED", True)
+    monkeypatch.setattr(bot, "_ig_probe", fake_probe)
+    p, fixed, clean = _run(bot.convert_supported_url(
+        "https://www.instagram.com/reel/ABC/?igsh=spam",
+    ))
+    assert p == bot.PLATFORM_INSTAGRAM
+    assert f"://{second}/" in fixed
+    assert clean == "https://www.instagram.com/reel/ABC/"
+
+
+def test_ig_redirect_target_used_when_no_proxy_serves_directly(monkeypatch) -> None:
+    async def fake_probe(proxy, path):
+        return True, "og-url", f"https://www.instagram.com{path}"
+
+    monkeypatch.setattr(bot, "IG_VERIFY_EMBED", True)
+    monkeypatch.setattr(bot, "_ig_probe", fake_probe)
+    p, fixed, clean = _run(bot.convert_supported_url(
+        "https://www.instagram.com/reel/ABC/?igsh=spam",
+    ))
+    assert p == bot.PLATFORM_INSTAGRAM
+    assert fixed == "https://www.instagram.com/reel/ABC/"
 
 
 def test_unsupported_clean_url_returns_none() -> None:
@@ -213,6 +336,20 @@ def test_build_message_includes_all_three_links_when_clean_provided() -> None:
     assert "Cleaned" in msg and "converted URL" in msg
     assert "Clean URL" in msg
     assert "Original" in msg
+
+
+def test_build_message_escapes_paren_in_urls() -> None:
+    """URLs containing ')' must be escaped inside MarkdownV2 inline links,
+    otherwise Telegram rejects the whole message with BadRequest."""
+    msg = bot._build_message(
+        platform=bot.PLATFORM_OTHER,
+        username="@a",
+        fixed_url="https://en.wikipedia.org/wiki/Foo_(bar)",
+        clean_url=None,
+        original_url="https://en.wikipedia.org/wiki/Foo_(bar)?utm_source=x",
+        user_text="",
+    )
+    assert "(https://en.wikipedia.org/wiki/Foo_(bar\\))" in msg
 
 
 def test_build_message_two_link_layout_when_clean_url_none() -> None:
