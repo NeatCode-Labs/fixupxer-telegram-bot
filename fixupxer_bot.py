@@ -435,6 +435,17 @@ _OG_META_CONTENT_FIRST = re.compile(
     re.IGNORECASE,
 )
 
+# Video-specific extractors: used to double-check that a page claiming a video
+# embed actually links to playable video content (see _media_is_video).
+_OG_VIDEO_PROP_FIRST = re.compile(
+    r"""<meta[^>]+?(?:property|name)=["'](?:og:video(?::url|:secure_url)?|twitter:player:stream)["'][^>]*?content=["']([^"']+)["']""",
+    re.IGNORECASE,
+)
+_OG_VIDEO_CONTENT_FIRST = re.compile(
+    r"""<meta[^>]+?content=["']([^"']+)["'][^>]*?(?:property|name)=["'](?:og:video(?::url|:secure_url)?|twitter:player:stream)["']""",
+    re.IGNORECASE,
+)
+
 
 def _log_evt(evt: str, **fields) -> None:
     """Structured-log helper (single-line JSON, easy to grep)."""
@@ -466,6 +477,34 @@ def _has_og_media(text: str) -> str | None:
     for m in _OG_META_CONTENT_FIRST.finditer(text):
         return m.group(1)
     return None
+
+
+def _og_video_url(text: str) -> str | None:
+    """Return the og:video / twitter:player:stream URL if the page declares one."""
+    for m in _OG_VIDEO_PROP_FIRST.finditer(text):
+        return m.group(1)
+    for m in _OG_VIDEO_CONTENT_FIRST.finditer(text):
+        return m.group(1)
+    return None
+
+
+async def _media_is_video(client, media_url: str) -> bool:
+    """GET the declared video URL and verify it really serves ``video/*``.
+
+    Catches half-dead proxies whose og:video endpoint redirects to a JPEG
+    cover frame (Telegram then renders a file attachment instead of a video
+    player) or errors out. Reads headers only — the body is never downloaded.
+    """
+    try:
+        async with client.stream(
+            "GET", media_url, headers={"Range": "bytes=0-1023"},
+        ) as response:
+            if response.status_code not in (200, 206):
+                return False
+            ct = response.headers.get("content-type", "").lower()
+            return ct.startswith("video/")
+    except Exception:  # noqa: BLE001 - any failure = endpoint can't serve video
+        return False
 
 
 class _ProxyHealthChecker:
@@ -636,6 +675,26 @@ class _ProxyHealthChecker:
                         text = response.text[:_IG_MAX_BYTES]
                         og_url = _has_og_media(text)
                         passed = og_url is not None
+                        # When the proxy itself serves a page claiming a video
+                        # embed, verify the video endpoint actually returns
+                        # video/* — half-dead proxies redirect it to a JPEG
+                        # cover frame, which Telegram renders as a file
+                        # attachment. (Skipped when the page came from a
+                        # redirect to the origin site: those candidates are
+                        # already last-resort fallbacks.)
+                        if passed and response.url.host == host:
+                            video_url = _og_video_url(text)
+                            if video_url is not None:
+                                resolved = urllib.parse.urljoin(
+                                    str(response.url), video_url,
+                                )
+                                if not await _media_is_video(client, resolved):
+                                    passed = False
+                                    og_url = None
+                                    _log_evt(
+                                        f"{self._name}_probe_bad_video",
+                                        proxy=proxy, path=path, video=resolved,
+                                    )
             except Exception as e:  # noqa: BLE001 - any failure = proxy didn't serve
                 _log_evt(
                     f"{self._name}_probe_error", proxy=proxy, path=path, error=str(e),

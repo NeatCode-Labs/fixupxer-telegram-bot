@@ -225,6 +225,55 @@ def test_tiktok_all_fail_returns_none_fixed(monkeypatch) -> None:
     assert clean == "https://www.tiktok.com/@user/video/123"
 
 
+# ---- Probe video validation ---------------------------------------------------
+
+_ADAMLIKES_STYLE_HTML = """
+<meta name="twitter:player:stream" content="/videos/ABC/1"/>
+<meta property="og:video" content="/videos/ABC/1"/>
+<meta property="og:image" content="/images/ABC/1"/>
+"""
+
+_PHOTO_ONLY_HTML = '<meta property="og:image" content="/images/ABC/1"/>'
+
+
+def test_og_video_url_extracted_and_photo_pages_return_none() -> None:
+    assert bot._og_video_url(_ADAMLIKES_STYLE_HTML) == "/videos/ABC/1"
+    assert bot._og_video_url(_PHOTO_ONLY_HTML) is None
+
+
+class _FakeStream:
+    def __init__(self, status_code: int, content_type: str) -> None:
+        self.status_code = status_code
+        self.headers = {"content-type": content_type}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeClient:
+    def __init__(self, status_code: int, content_type: str) -> None:
+        self._resp = (status_code, content_type)
+
+    def stream(self, method: str, url: str, **kwargs):
+        return _FakeStream(*self._resp)
+
+
+def test_media_is_video_rejects_jpeg_and_errors_accepts_mp4() -> None:
+    # adamlikes.men failure mode: og:video endpoint 302s to a JPEG cover frame.
+    assert asyncio.run(
+        bot._media_is_video(_FakeClient(200, "image/jpeg"), "https://p/v/1")
+    ) is False
+    assert asyncio.run(
+        bot._media_is_video(_FakeClient(500, "text/plain"), "https://p/v/1")
+    ) is False
+    assert asyncio.run(
+        bot._media_is_video(_FakeClient(200, "video/mp4"), "https://p/v/1")
+    ) is True
+
+
 # ---- Instagram proxy selection (probe mocked) --------------------------------
 
 def test_ig_prefers_direct_serving_proxy_over_redirect(monkeypatch) -> None:
