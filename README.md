@@ -6,6 +6,14 @@ A Telegram bot that removes known tracking parameters from URLs and converts X/T
   <img src="fixupxer_round.png" alt="FixupXer Bot Logo" width="150">
 </p>
 
+## Changes in 0.3.2 (2026-09-05)
+
+Instagram cleaning now removes the `stkn` share parameter from Instagram URLs and recognised or configured Instagram proxy URLs. For example, `https://www.instagram.com/reel/Dc4fAOCs97R/?stkn=anBpYnlkeG82MDJz` cleans to `https://www.instagram.com/reel/Dc4fAOCs97R/` before frontend conversion.
+
+This release also closes two existing bot cleaning gaps: `igsi`, already covered by the Android app, and `ig_rid`, listed in [Brave's Instagram cleaning rules](https://github.com/brave/adblock-lists/blob/master/brave-lists/clean-urls.json). Both are existing parameters. For example, `https://www.instagram.com/reel/Da0a2ylvv4z/?igsi=Nm44MGppNTFIZXNw` now cleans to `https://www.instagram.com/reel/Da0a2ylvv4z/`.
+
+Unknown and functional parameters, such as `img_index` and `story_media_id`, remain intact. The existing exact, case-sensitive key policy applies to `stkn`, `igsi` and `ig_rid`: duplicate pairs and keys percent-encoded once are removed; differently cased keys, double-encoded keys and fragment contents are preserved. Other hosts, including retired unsafe frontends, do not receive these Instagram-specific rules.
+
 ## ✨ Features
 
 - 🔄 **Automatic Link Conversion**: Cleans and converts X/Twitter, Instagram and TikTok links for improved embeds; Facebook receives tracking removal only
@@ -345,7 +353,7 @@ ruff check .
 
 `tests/conftest.py` prevents `.env` loading before the bot module is imported, supplies isolated test configuration and assigns a temporary SQLite database to each test. It disables default embed verification and blocks real HTTP transports; tests that exercise HTTP behaviour provide mocked transports. These checks do not need a real Telegram token or a running bot and do not use the deployment database.
 
-Tests cover cleaner fixtures, proxy selection, message delivery failures, `/delete` ownership, Telegram message limits, forum topics, retry bounds and statistics/log privacy. CI repeats the offline suite and lint on Python 3.10, 3.11 and 3.12. Live Telegram behaviour and deployment checks are separate from this suite.
+Tests cover cleaner fixtures, proxy selection, message delivery failures, `/delete` ownership, Telegram message limits, forum topics, retry bounds and statistics/log privacy. Instagram `stkn`, `igsi` and `ig_rid` regressions also cover duplicate and encoded keys, functional query preservation, host boundaries and custom proxies, with an additional mocked message-delivery regression for `stkn`. CI repeats the offline suite and lint on Python 3.10, 3.11 and 3.12. Live Telegram behaviour and deployment checks are separate from this suite.
 
 ## 🤝 Contributing
 

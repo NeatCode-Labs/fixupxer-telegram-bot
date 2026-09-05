@@ -1,4 +1,4 @@
-"""Instagram cleaner — 67 tracking params + 8 preserve params (parity with app)."""
+"""Remove known Instagram tracking keys while preserving functional parameters."""
 from __future__ import annotations
 
 from ..base import CleanerCategory
@@ -6,7 +6,7 @@ from ._base import AggressiveCleaner
 
 _TRACKING = frozenset({
     # Basic
-    "igsh", "igshid", "ig_cache_key", "ig_mid",
+    "igsh", "igshid", "stkn", "igsi", "ig_rid", "ig_cache_key", "ig_mid",
     "ig_share_sheet", "__a", "__d", "_rdr", "hl",
     # Share
     "share_app_id", "share_sheet_id", "share_id",
