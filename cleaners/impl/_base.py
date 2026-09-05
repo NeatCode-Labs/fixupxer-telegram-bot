@@ -1,11 +1,7 @@
-"""Shared helper used by every per-domain cleaner.
+"""Shared domain cleaner: preserve functional and unknown parameters.
 
-The Android app uses an "aggressive" pattern in 9/11 cleaners:
-  - Keep parameters that appear in `preserve_params`
-  - Drop parameters that appear in `tracking_params`
-  - Drop everything else (unknown == probably tracking)
-
-`extra_keep_predicate` provides an escape hatch (e.g. LinkedIn keeps `f_*`).
+The historical class name is retained for callers, but only known tracking
+parameters are removed. `extra_keep_predicate` protects functional key families.
 """
 from __future__ import annotations
 
@@ -37,6 +33,9 @@ class AggressiveCleaner(UrlCleaner):
     def matches(self, url: str) -> bool:
         return CleanerUtils.host_matches(url, self._domains)
 
+    def preserves_query_key(self, url: str, key: str) -> bool:
+        return key in self._preserve or bool(self._extra_keep and self._extra_keep(key))
+
     def clean(self, url: str) -> str:
         if "?" not in url:
             return url
@@ -51,5 +50,5 @@ class AggressiveCleaner(UrlCleaner):
                 return pair
             if key in tracking:
                 return None
-            return None  # aggressive: drop unknown
+            return pair
         return CleanerUtils.filter_query(url, decide)

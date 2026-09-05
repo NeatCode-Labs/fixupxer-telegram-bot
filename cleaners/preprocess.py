@@ -1,4 +1,4 @@
-"""URL preprocessing: zero-width strip, IDN ASCII, URL decode, leading '@' strip.
+"""URL preprocessing: zero-width strip, IDN ASCII, leading '@' strip.
 
 Mirrors `UrlProcessor.preprocessUrl` in the Android app, plus the IG-share
 '@' prefix handling done in app share extras.
@@ -31,7 +31,7 @@ def preprocess(url: str) -> str:
     """Apply the same prefilters as the Android app.
 
     - strip zero-width characters
-    - URL-decode percent-encoded characters once (so cleaners see real keys)
+    - preserve percent-encoding in paths, query values and fragments
     - peel leading '@' (Instagram share targets)
     - convert non-ASCII domain → ASCII via IDNA
     """
@@ -42,22 +42,21 @@ def preprocess(url: str) -> str:
     if cleaned.startswith("@"):
         cleaned = cleaned[1:]
 
-    # Preserve scheme. Decode only once (further passes can break '%' inside URLs).
+    # Parse the authority before touching the hostname: ':' may belong to userinfo
+    # or IPv6, and reserved characters in the other components must stay encoded.
     try:
-        decoded = urllib.parse.unquote(cleaned)
-    except Exception:
-        decoded = cleaned
-
-    # IDN → ASCII for the host portion only.
-    if "://" in decoded:
-        scheme, rest = decoded.split("://", 1)
-        end = len(rest)
-        for ch in "/?#:":
-            i = rest.find(ch)
-            if i != -1 and i < end:
-                end = i
-        host = rest[:end]
+        parsed = urllib.parse.urlsplit(cleaned)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return cleaned
+        userinfo, marker, authority = parsed.netloc.rpartition("@")
+        if not marker:
+            authority = parsed.netloc
+        if authority.startswith("["):
+            return cleaned  # IPv6 literals do not need IDNA conversion.
+        host, colon, port = authority.partition(":")
         ascii_host = _idn_to_ascii(host)
-        decoded = f"{scheme}://{ascii_host}{rest[end:]}"
-
-    return decoded
+        netloc = (userinfo + marker if marker else "") + ascii_host + colon + port
+        authority_start = cleaned.index("://") + 3
+        return cleaned[:authority_start] + netloc + cleaned[authority_start + len(parsed.netloc):]
+    except ValueError:
+        return cleaned

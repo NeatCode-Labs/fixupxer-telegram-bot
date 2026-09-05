@@ -4,7 +4,7 @@ Public API:
     deep_clean(url, max_passes=5) -> str   one-shot helper
     CleanerService                          stateful service for advanced use
     DEFAULT_REGISTRY                        pre-populated CleanerRegistry
-    preprocess(url) -> str                  IDN + zero-width + decode + @-strip
+    preprocess(url) -> str                  IDN + zero-width + @-strip
 """
 
 from .base import CleanerCategory, CleanerUtils, UrlCleaner

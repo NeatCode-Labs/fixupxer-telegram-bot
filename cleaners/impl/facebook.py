@@ -68,7 +68,7 @@ _PRESERVE = frozenset({
 FacebookCleaner = AggressiveCleaner(
     id="facebook",
     category=CleanerCategory.SOCIAL_MEDIA,
-    domains=("facebook.com", "fb.com", "fb.watch", "facebookez.com", "m.facebook.com"),
+    domains=("facebook.com", "fb.com", "fb.watch", "m.facebook.com"),
     tracking=_TRACKING,
     preserve=_PRESERVE,
 )

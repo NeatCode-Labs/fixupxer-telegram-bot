@@ -1,8 +1,6 @@
 """YouTube cleaner — special handling for `youtu.be/` short links and `music.youtube.com`."""
 from __future__ import annotations
 
-import re
-
 from ..base import CleanerCategory, CleanerUtils, UrlCleaner
 
 _TRACKING = frozenset({
@@ -53,11 +51,6 @@ _PRESERVE = frozenset({
 # Music adds "si" and "radio" back as preserved.
 _MUSIC_PRESERVE = _PRESERVE | {"radio", "si"}
 
-_SHORT_VIDEO_RE = re.compile(r"youtu\.be/([a-zA-Z0-9_-]{11})")
-_TIMESTAMP_RE = re.compile(r"[?&]t=([0-9]+[hms]?[0-9]*[ms]?[0-9]*s?)")
-_LIST_RE = re.compile(r"[?&]list=([a-zA-Z0-9_-]+)")
-
-
 class _YouTubeCleaner(UrlCleaner):
     id = "youtube"
     category = CleanerCategory.VIDEO_PLATFORMS
@@ -69,28 +62,14 @@ class _YouTubeCleaner(UrlCleaner):
         )
 
     def clean(self, url: str) -> str:
-        if "youtu.be/" in url:
-            return self._clean_short(url)
-        if "music.youtube.com" in url:
+        if CleanerUtils.extract_host(url) == "music.youtube.com":
             return self._clean_with(url, _MUSIC_PRESERVE)
         return self._clean_with(url, _PRESERVE)
 
-    def _clean_short(self, url: str) -> str:
-        match = _SHORT_VIDEO_RE.search(url)
-        if not match:
-            return self._clean_with(url, _PRESERVE)
-        video_id = match.group(1)
-        params: list[str] = []
-        ts = _TIMESTAMP_RE.search(url)
-        if ts:
-            params.append(f"t={ts.group(1)}")
-        lst = _LIST_RE.search(url)
-        if lst:
-            params.append(f"list={lst.group(1)}")
-        out = f"https://youtu.be/{video_id}"
-        if params:
-            out += "?" + "&".join(params)
-        return out
+    def preserves_query_key(self, url: str, key: str) -> bool:
+        preserve = (_MUSIC_PRESERVE if CleanerUtils.extract_host(url) == "music.youtube.com"
+                    else _PRESERVE)
+        return key in preserve
 
     def _clean_with(self, url: str, preserve: frozenset) -> str:
         if "?" not in url:
@@ -101,7 +80,7 @@ class _YouTubeCleaner(UrlCleaner):
                 return pair
             if key in _TRACKING:
                 return None
-            return None
+            return pair
         return CleanerUtils.filter_query(url, decide)
 
 

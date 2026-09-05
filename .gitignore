@@ -1,5 +1,6 @@
 # Python virtual environment
 venv/
+.venv*/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -35,4 +36,4 @@ Addon/
 FxEmbed/
 
 # Exclude nested .git directories
-*/**/.git/ 
+*/**/.git/

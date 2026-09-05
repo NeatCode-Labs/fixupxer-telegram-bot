@@ -48,11 +48,10 @@ class _RedditCleaner(UrlCleaner):
     def matches(self, url: str) -> bool:
         return CleanerUtils.host_matches(url, ("reddit.com", "redd.it"))
 
+    def preserves_query_key(self, url: str, key: str) -> bool:
+        return key in _PRESERVE
+
     def clean(self, url: str) -> str:
-        # redd.it short-links: drop the entire query string (matches app).
-        if "redd.it" in url.lower():
-            q = url.find("?")
-            return url if q == -1 else url[:q]
         if "?" not in url:
             return url
 
@@ -61,7 +60,7 @@ class _RedditCleaner(UrlCleaner):
                 return pair
             if key in _TRACKING:
                 return None
-            return None
+            return pair
         return CleanerUtils.filter_query(url, decide)
 
 

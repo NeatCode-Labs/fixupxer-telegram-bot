@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import urllib.parse
 
 from ..base import CleanerCategory, CleanerUtils, UrlCleaner
 
@@ -59,17 +60,11 @@ _PRESERVE = frozenset({
 
 # Order matters: `/dp/<asin>` is the canonical form; falls back to looser patterns.
 _ASIN_PATTERNS = [
-    re.compile(r"/dp/([A-Z0-9]{10})"),
-    re.compile(r"/gp/product/([A-Z0-9]{10})"),
-    re.compile(r"/exec/obidos/ASIN/([A-Z0-9]{10})"),
+    re.compile(r"/dp/([A-Z0-9]{10})(?:/|$)"),
+    re.compile(r"/gp/product/([A-Z0-9]{10})(?:/|$)"),
+    re.compile(r"/exec/obidos/ASIN/([A-Z0-9]{10})(?:/|$)"),
     re.compile(r"/([A-Z0-9]{10})(?:/|\?|$)"),
 ]
-
-_DOMAIN_RE = {
-    domain: re.compile(rf"((?:www\.|smile\.)?{re.escape(domain)})", re.IGNORECASE)
-    for domain in _DOMAINS
-}
-
 
 class _AmazonCleaner(UrlCleaner):
     id = "amazon"
@@ -78,11 +73,17 @@ class _AmazonCleaner(UrlCleaner):
     def matches(self, url: str) -> bool:
         return CleanerUtils.host_matches(url, _DOMAINS)
 
+    def preserves_query_key(self, url: str, key: str) -> bool:
+        return key in _PRESERVE
+
     def clean(self, url: str) -> str:
         asin = self._extract_asin(url)
         if asin:
-            host = self._extract_host(url) or "www.amazon.com"
-            return f"https://{host}/dp/{asin}"
+            parsed = urllib.parse.urlsplit(url)
+            _, query, fragment = CleanerUtils.split_url(url)
+            url = CleanerUtils.rebuild_url(
+                f"https://{parsed.netloc}/dp/{asin}", [query] if query else [], fragment,
+            )
         if "?" not in url:
             return url
 
@@ -91,26 +92,19 @@ class _AmazonCleaner(UrlCleaner):
                 return pair
             if key in _TRACKING:
                 return None
-            return None
+            return pair
         return CleanerUtils.filter_query(url, decide)
 
     @staticmethod
     def _extract_asin(url: str) -> str | None:
+        try:
+            path = urllib.parse.urlsplit(url).path
+        except ValueError:
+            return None
         for pat in _ASIN_PATTERNS:
-            m = pat.search(url)
+            m = pat.search(path)
             if m:
                 return m.group(1)
         return None
-
-    @staticmethod
-    def _extract_host(url: str) -> str | None:
-        lower = url.lower()
-        for domain in _DOMAINS:
-            if domain in lower:
-                m = _DOMAIN_RE[domain].search(url)
-                if m:
-                    return m.group(1).lower()
-        return None
-
 
 AmazonCleaner = _AmazonCleaner()

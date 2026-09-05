@@ -1,13 +1,14 @@
 """General fallback cleaner — drops 106 universal tracking params + tracking prefixes.
 
-Unlike domain-specific cleaners, this one keeps unknown params (so it's safe
-to apply to *any* URL).
+Unknown parameters and domain-specific functional exceptions are preserved.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from ..base import CleanerCategory, CleanerUtils, UrlCleaner
 
-_COMMON_TRACKING = frozenset({
+_COMMON_TRACKING = frozenset(key.lower() for key in {
     # UTM
     "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
     "utm_id", "utm_name", "utm_reader", "utm_brand", "utm_pubreferrer",
@@ -50,11 +51,16 @@ class _GeneralCleaner(UrlCleaner):
         return True  # opt-in everywhere; runs last per priority
 
     def clean(self, url: str) -> str:
+        return self.clean_with_preserved(url, lambda key: False)
+
+    def clean_with_preserved(self, url: str, preserve: Callable[[str], bool]) -> str:
         def decide(key: str, pair: str) -> str | None:
+            if preserve(key):
+                return pair
             lc = key.lower()
             if lc in _COMMON_TRACKING or any(lc.startswith(p) for p in _PREFIXES):
                 return None
-            return pair  # keep everything else (unlike aggressive cleaners)
+            return pair
         # Always run filter_query so it can fix `&-without-?` malformations.
         return CleanerUtils.filter_query(url, decide)
 

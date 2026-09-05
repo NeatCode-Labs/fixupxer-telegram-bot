@@ -17,6 +17,7 @@ from telegram.error import (
     Conflict,
     Forbidden,
     NetworkError,
+    RetryAfter,
     TelegramError,
 )
 from telegram.ext import (
@@ -40,6 +41,11 @@ logging.basicConfig(
     level=os.environ.get("FIXUPXER_LOG_LEVEL", "INFO").upper(),
 )
 logger = logging.getLogger(__name__)
+# HTTP request URLs include the Telegram token and may include private link data.
+for _http_logger in ("httpx", "httpcore"):
+    logging.getLogger(_http_logger).setLevel(logging.WARNING)
+# PTB's DEBUG output includes complete Updates and request/response payloads.
+logging.getLogger("telegram").setLevel(logging.INFO)
 
 # Soft imports for optional health-check stack. If httpx or cachetools is
 # missing, the bot still runs — embed verification is silently disabled and
@@ -71,7 +77,7 @@ def _parse_int_csv(raw: str | None, label: str) -> list[int]:
         try:
             out.append(int(token))
         except ValueError:
-            logger.warning("Invalid %s id ignored: %r", label, token)
+            logger.warning("Invalid %s id ignored", label)
     return out
 
 
@@ -83,13 +89,52 @@ def _parse_str_csv(raw: str | None, default: tuple[str, ...]) -> list[str]:
     return out or list(default)
 
 
+_RETIRED_PROXY_DOMAINS = ("facebookez.com", "kkinstagram.com")
+_PROXY_ORIGIN_DOMAINS = (
+    "instagram.com", "tiktok.com", "twitter.com", "x.com", "facebook.com",
+    "fb.com", "fb.watch", "youtube.com", "youtu.be", "reddit.com", "redd.it",
+    "threads.net", "threads.com", "bsky.app", "pinterest.com", "pin.it",
+    "fixupx.com", "fxtwitter.com", "vxtwitter.com",
+)
+_TIKTOK_PROXY_DOMAINS = ("tnktok.com", "tfxktok.com", "tiktokez.com", "kktiktok.com")
+_TIKTOK_LEGACY_PROXIES = ("vxtiktok.com", "tiktxk.com")
+
+
+def _parse_proxy_order(
+    raw: str | None, default: tuple[str, ...], *, reserved: tuple[str, ...] = (),
+    platform: str | None = None,
+) -> list[str]:
+    """Accept bare DNS names; retired frontends cannot be re-enabled by config."""
+    proxies = []
+    validator = cleaner_engine.CleanerRegistry()
+    validator.register_all(cleaner_engine.DEFAULT_REGISTRY.all_cleaners())
+    for value in _parse_str_csv(raw, default):
+        domain = value.lower().rstrip(".")
+        valid = len(domain) <= 253 and re.fullmatch(
+            r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+            r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?", domain,
+        )
+        blocked = any(domain == p or domain.endswith("." + p) or p.endswith("." + domain)
+                      for p in _RETIRED_PROXY_DOMAINS + _PROXY_ORIGIN_DOMAINS + reserved)
+        if valid and not blocked and platform is not None:
+            try:
+                validator.configure_proxy_domains(**{platform: [*proxies, domain]})
+            except ValueError:
+                blocked = True
+        if valid and not blocked and domain not in proxies:
+            proxies.append(domain)
+        elif not valid or blocked:
+            logger.warning("Ignored an invalid or reserved proxy configuration entry")
+    return proxies or list(default)
+
+
 # In-memory read-cache for /delete authorisation. SQLite (delete_tokens
 # table) is the source of truth; this dict avoids a DB hit on every
 # /delete. Bounded LRU prevents unbounded growth on long-running deploys.
 if _cachetools is not None:
     user_message_map: dict = _cachetools.LRUCache(maxsize=5000)
 else:
-    user_message_map = {}
+    user_message_map = collections.OrderedDict()
 
 BOT_ADMINS: list[int] = _parse_int_csv(os.environ.get("FIXUPXER_ADMINS"), "FIXUPXER_ADMINS")
 
@@ -97,9 +142,9 @@ BOT_ADMINS: list[int] = _parse_int_csv(os.environ.get("FIXUPXER_ADMINS"), "FIXUP
 STATS_DISABLED: bool = os.environ.get("FIXUPXER_DISABLE_STATS") == "1"
 
 # ---- Instagram proxy configuration --------------------------------------
-# Default order mirrors the Android app v1.6.0 roster: toinstagram.com and
+# Default order follows the Android app's active roster: toinstagram.com and
 # adamlikes.men (primaries — full OG meta tags: media + post/reel title &
-# description), then instagram7.com and kkinstagram.com (backups).
+# description), then instagram7.com (backup). Retired frontends are excluded.
 # _ig_probe accepts both styles (full og:image/og:video HTML and image/* or
 # video/* CDN redirects).
 # All proxies are addressed on the bare host (no `www.` prefix). Adamlikes
@@ -109,14 +154,20 @@ STATS_DISABLED: bool = os.environ.get("FIXUPXER_DISABLE_STATS") == "1"
 # URLs on those (dead/passthrough) proxies still get cleaned and re-hosted
 # onto an active proxy.
 _DEFAULT_IG_PROXIES = (
-    "toinstagram.com", "adamlikes.men", "instagram7.com", "kkinstagram.com",
+    "toinstagram.com", "adamlikes.men", "instagram7.com",
 )
 _HISTORICAL_IG_HOSTS = (
     "eeinstagram.com",
     "ddinstagram.com",
 )
-IG_PROXY_ORDER: list[str] = _parse_str_csv(
+IG_PROXY_ORDER: list[str] = _parse_proxy_order(
     os.environ.get("FIXUPXER_IG_PROXY_ORDER"), _DEFAULT_IG_PROXIES,
+    platform="instagram",
+    reserved=_TIKTOK_PROXY_DOMAINS + _TIKTOK_LEGACY_PROXIES + tuple(
+        domain.lower().rstrip(".") for domain in _parse_str_csv(
+            os.environ.get("FIXUPXER_TIKTOK_PROXY_ORDER"), _TIKTOK_PROXY_DOMAINS,
+        ) if domain.lower().rstrip(".") not in _DEFAULT_IG_PROXIES
+    ),
 )
 IG_HEALTH_TTL_SECONDS: int = int(os.environ.get("FIXUPXER_IG_HEALTH_TTL_SECONDS", "600"))
 IG_PROBE_INTERVAL_SECONDS: int = int(
@@ -140,6 +191,8 @@ if IG_VERIFY_EMBED and _cachetools is None:
     IG_VERIFY_EMBED = False
 
 _IG_HTTP_TIMEOUT: float = 3.0
+# One budget for redirects, streamed HTML and any follow-up video validation.
+_IG_PROBE_TOTAL_TIMEOUT: float = 6.0
 _IG_USER_AGENT: str = "TelegramBot (like TwitterBot)"
 _IG_MAX_BYTES: int = 65536
 # Path used by the background probe to keep proxy health current. Must be a
@@ -169,10 +222,10 @@ PLATFORM_OTHER = 'other'
 # proxies are recognised only so pasted URLs on them get migrated to the
 # active proxy. Unlike Instagram, subdomain prefixes (vm./vt./m./www.) are
 # preserved on rewrite — short-link resolution happens on the same prefix.
-_TIKTOK_PROXY_DOMAINS = ("tnktok.com", "tfxktok.com", "tiktokez.com", "kktiktok.com")
-_TIKTOK_LEGACY_PROXIES = ("vxtiktok.com", "tiktxk.com")
-TIKTOK_PROXY_ORDER: list[str] = _parse_str_csv(
+TIKTOK_PROXY_ORDER: list[str] = _parse_proxy_order(
     os.environ.get("FIXUPXER_TIKTOK_PROXY_ORDER"), _TIKTOK_PROXY_DOMAINS,
+    platform="tiktok",
+    reserved=tuple(IG_PROXY_ORDER) + _DEFAULT_IG_PROXIES + _HISTORICAL_IG_HOSTS,
 )
 # TikTok embed verification reuses the Instagram probe machinery. Defaults
 # to the FIXUPXER_IG_VERIFY_EMBED setting so one env var disables both
@@ -227,6 +280,9 @@ def _db_connect():
     threading hazards when callers run via asyncio.to_thread. The actual cost
     (sub-millisecond on local fs) is dwarfed by the surrounding I/O.
     """
+    # New databases get private permissions; existing databases are preserved.
+    descriptor = os.open(_db_path(), os.O_CREAT | os.O_RDWR, 0o600)
+    os.close(descriptor)
     conn = sqlite3.connect(_db_path())
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -325,7 +381,9 @@ def _track_conversion_sync(user_id, chat_id, original_url, converted_url) -> Non
         conn.execute(
             "INSERT INTO conversions (user_id, chat_id, original_url, converted_url) "
             "VALUES (?, ?, ?, ?)",
-            (user_id, chat_id, original_url, converted_url),
+            # Keep the schema and old rows compatible, but new statistics need
+            # only identity/time/counts, not the contents of users' links.
+            (user_id, chat_id, None, None),
         )
         conn.commit()
     finally:
@@ -448,11 +506,10 @@ _OG_VIDEO_CONTENT_FIRST = re.compile(
 
 
 def _log_evt(evt: str, **fields) -> None:
-    """Structured-log helper (single-line JSON, easy to grep)."""
-    try:
-        logger.info("%s", json.dumps({"evt": evt, **fields}, default=str))
-    except Exception:  # noqa: BLE001
-        logger.info("%s %r", evt, fields)
+    """Operational events deliberately omit link paths, URLs and user data."""
+    allowed = {"proxy", "tried", "override", "served_by_proxy", "error_type"}
+    safe = {key: value for key, value in fields.items() if key in allowed}
+    logger.info("%s", json.dumps({"evt": evt, **safe}, default=str))
 
 
 async def _get_probe_http_client():
@@ -496,8 +553,8 @@ async def _media_is_video(client, media_url: str) -> bool:
     player) or errors out. Reads headers only — the body is never downloaded.
     """
     try:
-        async with client.stream(
-            "GET", media_url, headers={"Range": "bytes=0-1023"},
+        async with _probe_stream(
+            client, media_url, headers={"Range": "bytes=0-1023"},
         ) as response:
             if response.status_code not in (200, 206):
                 return False
@@ -505,6 +562,24 @@ async def _media_is_video(client, media_url: str) -> bool:
             return ct.startswith("video/")
     except Exception:  # noqa: BLE001 - any failure = endpoint can't serve video
         return False
+
+
+@contextlib.asynccontextmanager
+async def _probe_stream(client, url: str, *, headers: dict):
+    """Follow at most three redirects, closing each body without downloading it."""
+    for redirects in range(4):
+        parsed = urllib.parse.urlsplit(url)
+        if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None):
+            raise ValueError("Invalid probe destination")
+        async with client.stream("GET", url, headers=headers, follow_redirects=False) as response:
+            if response.status_code in (301, 302, 303, 307, 308) and response.headers.get("location"):
+                if redirects == 3:
+                    raise ValueError("Probe redirect limit exceeded")
+                url = urllib.parse.urljoin(url, response.headers["location"])
+                continue
+            yield response
+            return
 
 
 class _ProxyHealthChecker:
@@ -648,56 +723,17 @@ class _ProxyHealthChecker:
         event = asyncio.Event()
         self._inflight[cache_key] = event
         try:
-            url = f"https://{host}{path}"
             passed = False
             og_url: str | None = None
             final_url: str | None = None
-            client = await _get_probe_http_client()
-            if client is None:
-                return False, None, None
             try:
-                response = await client.get(url)
-                final_url = str(response.url)
-                if response.status_code in (200, 206):
-                    ct = response.headers.get("content-type", "").lower()
-                    if ct.startswith("image/") or ct.startswith("video/"):
-                        # Proxy 302'd to raw CDN media (e.g. instagram7.com →
-                        # scontent.cdninstagram.com/X.jpg). Telegram still
-                        # renders an image preview when crawling the proxy URL,
-                        # so treat this as a successful embed. We pin final_url
-                        # back to the proxy URL so the caller's served_by_proxy
-                        # check keeps the user-facing URL on the proxy (avoiding
-                        # leaking the signed CDN URL with a short TTL).
-                        og_url = final_url
-                        final_url = url
-                        passed = True
-                    else:
-                        text = response.text[:_IG_MAX_BYTES]
-                        og_url = _has_og_media(text)
-                        passed = og_url is not None
-                        # When the proxy itself serves a page claiming a video
-                        # embed, verify the video endpoint actually returns
-                        # video/* — half-dead proxies redirect it to a JPEG
-                        # cover frame, which Telegram renders as a file
-                        # attachment. (Skipped when the page came from a
-                        # redirect to the origin site: those candidates are
-                        # already last-resort fallbacks.)
-                        if passed and response.url.host == host:
-                            video_url = _og_video_url(text)
-                            if video_url is not None:
-                                resolved = urllib.parse.urljoin(
-                                    str(response.url), video_url,
-                                )
-                                if not await _media_is_video(client, resolved):
-                                    passed = False
-                                    og_url = None
-                                    _log_evt(
-                                        f"{self._name}_probe_bad_video",
-                                        proxy=proxy, path=path, video=resolved,
-                                    )
+                passed, og_url, final_url = await asyncio.wait_for(
+                    self._probe_uncached(proxy, path, host),
+                    timeout=_IG_PROBE_TOTAL_TIMEOUT,
+                )
             except Exception as e:  # noqa: BLE001 - any failure = proxy didn't serve
                 _log_evt(
-                    f"{self._name}_probe_error", proxy=proxy, path=path, error=str(e),
+                    f"{self._name}_probe_error", proxy=proxy, error_type=type(e).__name__,
                 )
 
             if passed:
@@ -712,6 +748,50 @@ class _ProxyHealthChecker:
         finally:
             event.set()
             self._inflight.pop(cache_key, None)
+
+    async def _probe_uncached(
+        self, proxy: str, path: str, host: str,
+    ) -> tuple[bool, str | None, str | None]:
+        """Run the complete HTTP chain within ``probe``'s shared time budget."""
+        url = f"https://{host}{path}"
+        passed = False
+        og_url: str | None = None
+        final_url: str | None = None
+        client = await _get_probe_http_client()
+        if client is None:
+            return False, None, None
+
+        # Stream raw bytes with identity encoding: neither a large media body
+        # nor a compressed HTML bomb is buffered in RAM. Cancellation unwinds
+        # this context (and any nested video probe), closing their responses.
+        async with _probe_stream(
+            client, url, headers={"Accept-Encoding": "identity"},
+        ) as response:
+            final_url = str(response.url)
+            if response.status_code in (200, 206):
+                ct = response.headers.get("content-type", "").lower()
+                if ct.startswith(("image/", "video/")):
+                    og_url = final_url
+                    final_url = url
+                    passed = True
+                elif response.headers.get("content-encoding", "identity").lower() in ("", "identity"):
+                    body = bytearray()
+                    async for chunk in response.aiter_raw(chunk_size=4096):
+                        body.extend(chunk[:_IG_MAX_BYTES - len(body)])
+                        if len(body) >= _IG_MAX_BYTES:
+                            break
+                    page = body.decode("utf-8", errors="replace")
+                    og_url = _has_og_media(page)
+                    passed = og_url is not None
+                    if passed and response.url.host == host:
+                        video_url = _og_video_url(page)
+                        if video_url is not None:
+                            resolved = urllib.parse.urljoin(final_url, video_url)
+                            if not await _media_is_video(client, resolved):
+                                passed = False
+                                og_url = None
+                                _log_evt(f"{self._name}_probe_bad_video", proxy=proxy)
+        return passed, og_url, final_url
 
 
 _IG_HEALTH = _ProxyHealthChecker("ig", IG_HEALTH_TTL_SECONDS)
@@ -780,6 +860,9 @@ def _cleaner_cache_set(url: str, cleaned: str) -> None:
 
 
 # Wire the bot's cache callbacks into the cleaner engine's default service.
+cleaner_engine.DEFAULT_REGISTRY.configure_proxy_domains(
+    instagram=IG_PROXY_ORDER, tiktok=TIKTOK_PROXY_ORDER,
+)
 cleaner_engine._DEFAULT_SERVICE = cleaner_engine.CleanerService(
     cleaner_engine.DEFAULT_REGISTRY,
     cache_get=_cleaner_cache_get,
@@ -799,7 +882,7 @@ def _convert_x(url: str):
     domain is left intact — only twitter.com / x.com get rewritten to fixupx.
     """
     parsed = urllib.parse.urlparse(url)
-    domain = parsed.netloc.lower()
+    domain = (parsed.hostname or "").lower()
 
     clean_original = _clean_query(url)
 
@@ -839,7 +922,7 @@ async def _convert_instagram_async(url: str) -> tuple[str | None, str]:
     """
     clean_original = _clean_query(url)
     parsed = urllib.parse.urlparse(clean_original)
-    domain = parsed.netloc.lower()
+    domain = (parsed.hostname or "").lower()
     path = parsed.path or "/"
 
     def _strip_ig_subdomain(host: str) -> str:
@@ -874,7 +957,7 @@ async def _convert_instagram_async(url: str) -> tuple[str | None, str]:
             parsed.fragment,
         ))
         parsed = urllib.parse.urlparse(clean_original)
-        domain = parsed.netloc.lower()
+        domain = (parsed.hostname or "").lower()
         path = parsed.path or "/"
 
     # Override forces a single proxy (admin escape hatch) — same all-fail
@@ -935,8 +1018,8 @@ async def _convert_instagram_async(url: str) -> tuple[str | None, str]:
                 )
                 redirect_fallback = (fallback_url, proxy, og_url)
         except Exception as e:  # noqa: BLE001
-            last_error = str(e)
-            logger.warning("IG proxy %s probe failed: %s", proxy, e)
+            last_error = type(e).__name__
+            logger.warning("IG proxy %s probe failed (%s)", proxy, last_error)
 
     if redirect_fallback is not None:
         fixed, proxy, og_url = redirect_fallback
@@ -960,25 +1043,8 @@ async def _convert_instagram_async(url: str) -> tuple[str | None, str]:
     return None, clean_original
 
 def _convert_facebook(url: str):
-    """Return (fixed_url, clean_url) for Facebook links (any FB-family domain).
-
-    When the input is already on facebookez.com, returns ``(cleaned, None)`` so
-    no duplicate "fallback" link is emitted.
-    """
-    cleaned_url = _clean_query(url)
-    parsed = urllib.parse.urlparse(cleaned_url)
-    domain = parsed.netloc.lower()
-    if domain == "facebookez.com" or domain.endswith(".facebookez.com"):
-        return cleaned_url, None
-    fixed = urllib.parse.urlunparse((
-        parsed.scheme or "https",
-        "facebookez.com",
-        parsed.path,
-        parsed.params,
-        parsed.query,
-        parsed.fragment,
-    ))
-    return fixed, cleaned_url
+    """Facebook has no trusted built-in frontend; preserve its original host."""
+    return _clean_query(url), None
 
 
 async def _convert_tiktok_async(url: str) -> tuple[str | None, str]:
@@ -998,7 +1064,7 @@ async def _convert_tiktok_async(url: str) -> tuple[str | None, str]:
     """
     cleaned_url = _clean_query(url)
     parsed = urllib.parse.urlparse(cleaned_url)
-    domain = parsed.netloc.lower()
+    domain = (parsed.hostname or "").lower()
     path = parsed.path or "/"
 
     known_proxies = tuple(TIKTOK_PROXY_ORDER) + _TIKTOK_PROXY_DOMAINS
@@ -1069,8 +1135,8 @@ async def _convert_tiktok_async(url: str) -> tuple[str | None, str]:
             if redirect_fallback is None:
                 redirect_fallback = (final_url or _swap_host(host), proxy, og_url)
         except Exception as e:  # noqa: BLE001
-            last_error = str(e)
-            logger.warning("TikTok proxy %s probe failed: %s", proxy, e)
+            last_error = type(e).__name__
+            logger.warning("TikTok proxy %s probe failed (%s)", proxy, last_error)
 
     if redirect_fallback is not None:
         fixed, proxy, og_url = redirect_fallback
@@ -1099,7 +1165,7 @@ def escape_markdown(text: str) -> str:
     if not text:
         return ''
     # Escape all Telegram MarkdownV2 special characters
-    return re.sub(r'([_\*\[\]\(\)~`>#+\-=|{}.!])', r'\\\1', text)
+    return re.sub(r'([\\_\*\[\]\(\)~`>#+\-=|{}.!])', r'\\\1', text)
 
 
 def _escape_md_url(url: str) -> str:
@@ -1169,7 +1235,7 @@ _INSTAGRAM_HOSTS = ("instagram.com",) + tuple(IG_PROXY_ORDER) + _HISTORICAL_IG_H
 _FACEBOOK_HOSTS = ("facebook.com", "fb.com", "fb.watch")
 # NOTE: suffix matching means "kktiktok.com" does NOT accidentally match
 # "tiktok.com" (no "." boundary) — each proxy must be listed explicitly.
-_TIKTOK_HOSTS = ("tiktok.com",) + _TIKTOK_PROXY_DOMAINS + _TIKTOK_LEGACY_PROXIES
+_TIKTOK_HOSTS = ("tiktok.com",) + tuple(TIKTOK_PROXY_ORDER) + _TIKTOK_PROXY_DOMAINS + _TIKTOK_LEGACY_PROXIES
 
 
 def _host_matches(domain: str, hosts: tuple[str, ...]) -> bool:
@@ -1210,8 +1276,18 @@ async def convert_supported_url(url: str):
                                     the embed health check); caller logs and
                                     leaves the original message intact.
     """
-    parsed = urllib.parse.urlparse(url)
-    platform = _identify_platform(parsed.netloc)
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or re.search(r"[\x00-\x20\x7f\\]", url)
+                or re.search(r"%(?![0-9a-fA-F]{2})", url)):
+            return None, None, None
+        port = parsed.port  # validates malformed and out-of-range ports
+    except ValueError:
+        return None, None, None
+    # Rewriting a non-default port could change the resource being requested.
+    platform = _identify_platform(parsed.hostname) if port in (None, 80 if parsed.scheme == "http" else 443) else None
     if platform == PLATFORM_X:
         fixed, clean = _convert_x(url)
         if fixed == url and clean is None:
@@ -1250,10 +1326,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🔄 <b>X/Twitter</b>: x.com / twitter.com → fixupx.com / fxtwitter.com\n"
         "📸 <b>Instagram</b>: instagram.com → healthiest embed proxy (toinstagram.com, adamlikes.men, …)\n"
         "🎵 <b>TikTok</b>: tiktok.com → tnktok.com\n"
-        "📘 <b>Facebook</b>: facebook.com → facebookez.com\n\n"
-        "⚠️ <b>Heads-up</b>: Facebook often hides extra tracking behind secondary links that only activate after clicking on a primary link, so cleaning in most cases is impossible.\n\n"
+        "📘 <b>Facebook</b>: tracking cleanup, original domain preserved\n\n"
+        "I remove known tracking parameters while keeping functional and unknown parameters. Embed previews depend on third-party services.\n\n"
         "Add me to your group and I'll take care of every supported link automatically.\n\n"
-        "The original poster can delete my message at any time by replying with /delete (I need admin rights to delete).",
+        "The original poster or a group admin can request removal of my repost by replying with /delete, subject to Telegram's deletion limits.",
         parse_mode="HTML"
     )
 
@@ -1264,14 +1340,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "📝 <b>FixupXer bot – Help</b>\n\n"
         "Simply add me to any chat. Whenever someone posts a supported link, I'll: \n"
-        "1. Delete the original message (needs admin rights).\n"
-        "2. Repost a cleaned & converted version with proper embeds.\n\n"
+        "1. Repost up to three cleaned or converted links, in the same topic.\n"
+        "2. Remove the original only after safe, complete delivery (needs admin rights).\n"
+        "If delivery fails or the text is too long, I keep the original.\n\n"
         "<b>Supported platforms</b>:\n"
         "🔄 <b>X/Twitter</b>: x.com / twitter.com → fixupx.com / fxtwitter.com\n"
         "📸 <b>Instagram</b>: instagram.com → healthiest embed proxy (toinstagram.com, adamlikes.men, …)\n"
         "🎵 <b>TikTok</b>: tiktok.com → tnktok.com\n"
-        "📘 <b>Facebook</b>: facebook.com → facebookez.com\n\n"
-        "⚠️ <b>Note</b>: Facebook may still attach hidden tracking after click – I strip everything I can see.\n\n"
+        "📘 <b>Facebook</b>: tracking cleanup, original domain preserved\n\n"
+        "Unknown and functional URL parameters are preserved. Preview availability depends on third-party services.\n\n"
         "<b>Commands</b>:\n"
         "• /start – Show welcome information\n"
         "• /help – Show this message\n"
@@ -1371,9 +1448,7 @@ async def _delayed_delete(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception as e:  # noqa: BLE001 - best-effort cleanup
-        logger.warning(
-            "Delayed delete failed (chat=%s, msg=%s): %s", chat_id, message_id, e
-        )
+        logger.warning("Delayed delete failed (%s)", type(e).__name__)
 
 
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1383,7 +1458,8 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     SQLite ``delete_tokens`` table so /delete keeps working across bot
     restarts.
     """
-    if update.message is None or not update.message.reply_to_message:
+    if (update.message is None or update.message.from_user is None
+            or not update.message.reply_to_message):
         return  # /delete must reply to a message.
     replied = update.message.reply_to_message
     if replied.from_user is None or replied.from_user.id != context.bot.id:
@@ -1392,50 +1468,50 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = update.message.from_user.id
     chat_id = update.effective_chat.id
     bot_message_id = replied.message_id
+    message_key = (chat_id, bot_message_id)
 
     try:
-        chat_member = await context.bot.get_chat_member(chat_id, user_id)
-        is_admin = chat_member.status in ["administrator", "creator"]
-
-        is_original_poster = (
-            bot_message_id in user_message_map
-            and user_message_map[bot_message_id] == user_id
-        )
-        if not is_original_poster and not is_admin:
+        is_original_poster = user_message_map.get(message_key) == user_id
+        if not is_original_poster:
             db_user = await _lookup_delete_token(chat_id, bot_message_id)
             is_original_poster = db_user == user_id
+        is_admin = False
+        if not is_original_poster:
+            chat_member = await context.bot.get_chat_member(chat_id, user_id)
+            is_admin = chat_member.status in ("administrator", "creator")
 
         if is_original_poster or is_admin:
             await context.bot.delete_message(chat_id=chat_id, message_id=bot_message_id)
             try:
                 await update.message.delete()
             except TelegramError as e:
-                logger.warning("Failed to delete /delete command itself: %s", e)
-            user_message_map.pop(bot_message_id, None)
+                logger.warning("Failed to delete /delete command (%s)", type(e).__name__)
+            user_message_map.pop(message_key, None)
             await _remove_delete_token(chat_id, bot_message_id)
-            logger.info("Message %s deleted by user %s", bot_message_id, user_id)
+            logger.info("Bot repost deleted by an authorized user")
         else:
             await update.message.reply_text(
                 "You can only delete messages that were originally posted by you.",
                 reply_to_message_id=update.message.message_id,
             )
-            context.job_queue.run_once(
-                _delayed_delete,
-                when=5,
-                data=(chat_id, update.message.message_id),
-            )
+            if context.job_queue is not None:
+                context.job_queue.run_once(
+                    _delayed_delete,
+                    when=5,
+                    data=(chat_id, update.message.message_id),
+                )
     except BadRequest as e:
-        logger.error("BadRequest in /delete: %s", e)
+        logger.error("BadRequest in /delete (%s)", type(e).__name__)
         await update.message.reply_text(
             "Failed to delete the message — I might not have admin rights.",
             reply_to_message_id=update.message.message_id,
         )
     except Forbidden as e:
-        logger.warning("Forbidden in /delete: %s", e)
+        logger.warning("Forbidden in /delete (%s)", type(e).__name__)
     except TelegramError as e:
-        logger.error("TelegramError in /delete: %s", e)
-    except Exception:
-        logger.exception("Unexpected error in /delete")
+        logger.error("TelegramError in /delete (%s)", type(e).__name__)
+    except Exception as error:
+        logger.error("Unexpected error in /delete (%s)", type(error).__name__)
 
 async def setproxy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin-only Instagram proxy override.
@@ -1513,153 +1589,185 @@ async def _background_probe(context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 await _ig_probe(proxy, _IG_BG_PROBE_PATH)
             except Exception as e:  # noqa: BLE001
-                logger.warning("Background probe of %s failed: %s", proxy, e)
+                logger.warning("Background probe of %s failed (%s)", proxy, type(e).__name__)
     if TIKTOK_VERIFY_EMBED:
         for proxy in TIKTOK_PROXY_ORDER:
             try:
                 await _tt_probe(proxy, _TT_BG_PROBE_PATH)
             except Exception as e:  # noqa: BLE001
-                logger.warning("Background probe of %s failed: %s", proxy, e)
+                logger.warning("Background probe of %s failed (%s)", proxy, type(e).__name__)
 
 
 _MAX_URLS_PER_MESSAGE = 3
 
 
+_SEND_INTERVAL_GROUP = 3.1
+_SEND_INTERVAL_PRIVATE = 1.05
+_SEND_RETRY_LIMIT = 2
+_SEND_MAX_RETRY_AFTER = 30.0
+_last_repost_at: collections.OrderedDict = collections.OrderedDict()
+
+
+def _fits_telegram_message(text: str) -> bool:
+    # Conservative: markup also counts here. UTF-16 covers emoji surrogate pairs.
+    return len(text.encode("utf-16-le")) // 2 <= 4096
+
+
+def _remember_poster(chat_id: int, message_id: int, user_id: int) -> None:
+    key = (chat_id, message_id)
+    if key not in user_message_map and len(user_message_map) >= 5000:
+        user_message_map.pop(next(iter(user_message_map)))
+    user_message_map[key] = user_id
+
+
+async def _send_repost(bot, chat, text: str, thread_id: int | None):
+    """Space reposts and retry explicit flood control, never ambiguous timeouts."""
+    interval = _SEND_INTERVAL_PRIVATE if chat.type == "private" else _SEND_INTERVAL_GROUP
+    elapsed = time.monotonic() - _last_repost_at.get(chat.id, -float("inf"))
+    if elapsed < interval:
+        await asyncio.sleep(interval - elapsed)
+    kwargs = {
+        "chat_id": chat.id, "text": text, "parse_mode": "MarkdownV2",
+        "disable_web_page_preview": False,
+    }
+    if thread_id is not None:
+        kwargs["message_thread_id"] = thread_id
+    for attempt in range(_SEND_RETRY_LIMIT + 1):
+        try:
+            result = await bot.send_message(**kwargs)
+            _last_repost_at[chat.id] = time.monotonic()
+            _last_repost_at.move_to_end(chat.id)
+            if len(_last_repost_at) > 2000:
+                _last_repost_at.popitem(last=False)
+            return result
+        except RetryAfter as error:
+            delay = error.retry_after
+            seconds = delay.total_seconds() if hasattr(delay, "total_seconds") else float(delay)
+            if attempt == _SEND_RETRY_LIMIT or seconds > _SEND_MAX_RETRY_AFTER:
+                raise
+            logger.warning("Telegram flood control; retrying a repost")
+            await asyncio.sleep(max(0, seconds) + 0.1)
+    raise RuntimeError("Unreachable retry state")
+
+
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Find supported URLs in `update.message.text` and post cleaned versions.
-
-    Up to _MAX_URLS_PER_MESSAGE supported URLs are converted, each as its own
-    bot reply (Telegram only renders an embed for one URL per message, so a
-    single combined reply would only preview the first link). The original
-    message is deleted after at least one successful conversion.
-    """
-    if update.message is None:
-        return  # Edited messages / channel posts are intentionally ignored.
-    message = update.message.text
-    if not message:
+    """Repost up to three URLs; remove originals only after complete safe delivery."""
+    incoming = update.message
+    if incoming is None or not incoming.text or incoming.from_user is None:
         return
-
-    if update.message.from_user is None or update.message.from_user.is_bot:
+    user = incoming.from_user
+    if user.is_bot:
         return
-
-    raw_candidates = URL_PATTERN.findall(message)
-    # Order-preserving dedupe: the same URL pasted twice gets one reply.
-    candidates = list(dict.fromkeys(_trim_url_trail(c) for c in raw_candidates))
+    message = incoming.text
+    protected_entities = [entity for entity in (incoming.entities or ()) if entity.type != "url"]
+    candidates = {}
+    for match in URL_PATTERN.finditer(message):
+        candidate = _trim_url_trail(match.group())
+        start_utf16 = len(message[:match.start()].encode("utf-16-le")) // 2
+        end_utf16 = start_utf16 + len(candidate.encode("utf-16-le")) // 2
+        if any(start_utf16 < entity.offset + entity.length and end_utf16 > entity.offset
+               for entity in protected_entities):
+            continue  # Never expose a spoiler/code URL or replace a hidden link label.
+        candidates.setdefault(candidate, match.start())
     if not candidates:
         return
 
-    user = update.message.from_user
+    chat = update.effective_chat
     username = f"@{user.username}" if user.username else user.first_name
-    chat_id = update.effective_chat.id
-
     sent_count = 0
+    attempted_count = 0
     user_text_attached = False
     stats_tracked = False
-    for candidate in candidates:
-        if sent_count >= _MAX_URLS_PER_MESSAGE:
+    # Hidden link targets, spoilers and other Telegram formatting cannot be
+    # faithfully recreated as a plain blockquote. Keep that original in place.
+    rich_text = bool(protected_entities)
+    preserve_original = rich_text
+    for candidate, url_start in candidates.items():
+        if attempted_count >= _MAX_URLS_PER_MESSAGE:
+            preserve_original = True
             break
-
-        platform, fixed_url, clean_url = await convert_supported_url(candidate)
+        try:
+            platform, fixed_url, clean_url = await convert_supported_url(candidate)
+        except Exception as error:  # a single malformed link must not lose other text
+            logger.warning("URL conversion failed (%s)", type(error).__name__)
+            preserve_original = True
+            continue
         if platform is None:
             continue
+        attempted_count += 1
         if fixed_url is None:
-            # All proxies failed the embed health check: log + skip (do not
-            # send replacement, do not delete original — "all-fail policy").
-            logger.warning(
-                "%s all-fail for %s; leaving original message intact.",
-                platform,
-                candidate,
-            )
+            logger.warning("%s proxies unavailable; keeping original message", platform)
+            preserve_original = True
             continue
 
-        # Attach the user's surrounding text only to the first reply so it
-        # isn't duplicated across multi-URL messages.
-        if not user_text_attached:
-            url_start = message.find(candidate)
-            user_text_attached = True
-            if url_start >= 0:
-                url_end = url_start + len(candidate)
-                text_before = message[:url_start].strip()
-                text_after = message[url_end:].strip()
-                user_text = (text_before + " " + text_after).strip()
-            else:
-                user_text = ""
-        else:
-            user_text = ""
-
+        user_text = ""
+        if not user_text_attached and not rich_text:
+            # Use the matched span, never a substring search which can hit a
+            # shorter URL embedded in an earlier, unrelated candidate.
+            user_text = message[:url_start] + message[url_start + len(candidate):]
         final_message = _build_message(
             platform, username, fixed_url, clean_url, candidate, user_text,
         )
+        attaches_text = not user_text_attached and not rich_text
+        if not _fits_telegram_message(final_message):
+            # The original carries the full text; send only a compact link reply.
+            preserve_original = True
+            attaches_text = False
+            final_message = _build_message(
+                platform, username, fixed_url, clean_url, candidate, "",
+            )
+        if not _fits_telegram_message(final_message):
+            logger.warning("Link reply exceeds Telegram's message limit; keeping original")
+            continue
 
         try:
-            bot_message = await context.bot.send_message(
-                chat_id=chat_id,
-                text=final_message,
-                parse_mode="MarkdownV2",
-                disable_web_page_preview=False,
+            bot_message = await _send_repost(
+                context.bot, chat, final_message, incoming.message_thread_id,
             )
-        except BadRequest as e:
-            # MarkdownV2 escaping bug, message too long, etc. — surface the
-            # real reason in logs instead of the misleading admin message.
-            logger.error("Telegram BadRequest while sending reply: %s", e)
-            continue
-        except Forbidden as e:
-            logger.warning("Bot is forbidden in chat %s: %s", chat_id, e)
+        except Forbidden:
+            logger.warning("Bot may not send messages in this chat")
             return
-        except TelegramError as e:
-            logger.error("Telegram error sending reply: %s", e)
-            continue
-        except Exception:
-            logger.exception("Unexpected error sending reply")
+        except Exception as error:
+            # A timeout may mean Telegram accepted the message. Do not resend it.
+            logger.warning("Repost failed (%s); keeping original", type(error).__name__)
+            preserve_original = True
             continue
 
-        user_message_map[bot_message.message_id] = user.id
-        await _save_delete_token(bot_message.message_id, chat_id, user.id)
-        if not stats_tracked:
-            # Lazy stats tracking: users/chats are recorded only when they
-            # actually trigger a conversion (matches the README's stats
-            # semantics; messages without conversions cost zero DB writes).
-            await track_user(user)
-            await track_chat(update.effective_chat)
-            stats_tracked = True
-        # Privacy: store only the cleaned URL (no tracking tokens) in stats.
-        await track_conversion(user.id, chat_id, clean_url or fixed_url, fixed_url)
-
-        logger.info(
-            "Converted %s -> %s (platform=%s) for %s",
-            candidate, fixed_url, platform, username,
-        )
         sent_count += 1
+        user_text_attached = user_text_attached or attaches_text
+        _remember_poster(chat.id, bot_message.message_id, user.id)
+        try:
+            await _save_delete_token(bot_message.message_id, chat.id, user.id)
+            if not stats_tracked:
+                await track_user(user)
+                await track_chat(chat)
+                stats_tracked = True
+            await track_conversion(user.id, chat.id, clean_url or fixed_url, fixed_url)
+        except Exception as error:
+            logger.warning("Repost metadata could not be saved (%s)", type(error).__name__)
+            preserve_original = True
+        logger.info("URL processed (platform=%s)", platform)
 
-    if sent_count == 0:
+    if sent_count == 0 or preserve_original or not user_text_attached:
         return
-
     try:
-        await update.message.delete()
-    except BadRequest as e:
-        # Most common cause: bot lacks "Delete messages" admin right.
-        logger.warning("Failed to delete original message: %s", e)
-        with contextlib.suppress(TelegramError):
-            await update.message.reply_text(
-                "(Note: grant me admin rights to also delete the original message.)",
-                disable_web_page_preview=True,
-            )
-    except Forbidden as e:
-        logger.warning("Forbidden when deleting original: %s", e)
-    except TelegramError as e:
-        logger.warning("TelegramError when deleting original: %s", e)
+        await incoming.delete()
+    except (BadRequest, Forbidden):
+        logger.warning("Original message retained: deletion is not permitted or available")
+    except TelegramError as error:
+        logger.warning("Original message retained (%s)", type(error).__name__)
+
 
 async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Central PTB error handler.
 
-    Transport-level noise (polling conflicts, transient network errors) gets
-    one warning line; anything else keeps the full traceback.
+    Exception types identify failures without leaking URLs, tokens or messages.
     """
     err = context.error
     if isinstance(err, (Conflict, NetworkError)):
-        logger.warning("Telegram transport error: %s", err)
+        logger.warning("Telegram transport error (%s)", type(err).__name__)
         return
-    logger.error("Unhandled error while processing an update", exc_info=err)
+    logger.error("Unhandled update error (%s)", type(err).__name__)
 
 
 async def _post_shutdown(_application) -> None:
@@ -1669,13 +1777,13 @@ async def _post_shutdown(_application) -> None:
         try:
             await _probe_http_client.aclose()
         except Exception as e:  # noqa: BLE001
-            logger.warning("Error closing httpx client: %s", e)
+            logger.warning("Error closing httpx client (%s)", type(e).__name__)
         _probe_http_client = None
     if not STATS_DISABLED:
         try:
             await asyncio.to_thread(_wal_checkpoint_sync)
         except Exception as e:  # noqa: BLE001
-            logger.warning("WAL checkpoint failed: %s", e)
+            logger.warning("WAL checkpoint failed (%s)", type(e).__name__)
 
 
 def _wal_checkpoint_sync() -> None:
@@ -1737,7 +1845,7 @@ def main() -> None:
         # if the operator doesn't provide a dedicated path component.
         url_path = os.environ.get("FIXUPXER_WEBHOOK_PATH", token)
         secret_token = os.environ.get("FIXUPXER_WEBHOOK_SECRET") or None
-        logger.info("Starting in webhook mode on %s:%s (public URL=%s)", listen, port, webhook_url)
+        logger.info("Starting in webhook mode on port %s", port)
         application.run_webhook(
             listen=listen,
             port=port,

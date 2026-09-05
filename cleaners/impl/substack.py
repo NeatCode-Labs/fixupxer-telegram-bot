@@ -1,4 +1,4 @@
-"""Substack cleaner — only `publication_id` and `post_id` survive."""
+"""Substack cleaner — preserves post identifiers and unknown parameters."""
 from __future__ import annotations
 
 from ..base import CleanerCategory

@@ -1,4 +1,4 @@
-"""LinkedIn cleaner — keeps `f_*` filter params, strips lnkd.in queries."""
+"""LinkedIn cleaner — preserves search filters and unknown parameters."""
 from __future__ import annotations
 
 from ..base import CleanerCategory, CleanerUtils, UrlCleaner
@@ -52,10 +52,10 @@ class _LinkedInCleaner(UrlCleaner):
     def matches(self, url: str) -> bool:
         return CleanerUtils.host_matches(url, ("linkedin.com", "lnkd.in"))
 
+    def preserves_query_key(self, url: str, key: str) -> bool:
+        return key in _PRESERVE or key.startswith("f_")
+
     def clean(self, url: str) -> str:
-        if "lnkd.in" in url.lower():
-            q = url.find("?")
-            return url if q == -1 else url[:q]
         if "?" not in url:
             return url
 
@@ -66,7 +66,7 @@ class _LinkedInCleaner(UrlCleaner):
                 return pair  # f_* filter params (per app)
             if key in _TRACKING:
                 return None
-            return None
+            return pair
         return CleanerUtils.filter_query(url, decide)
 
 

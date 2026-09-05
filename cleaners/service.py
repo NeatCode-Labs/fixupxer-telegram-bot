@@ -56,9 +56,25 @@ class CleanerService:
             next_url = current
             for cleaner in cleaners:
                 try:
-                    candidate = cleaner.clean(next_url)
-                except Exception:
-                    logger.exception("Cleaner %s failed on URL %s", cleaner.id, next_url)
+                    clean_with_preserved = getattr(cleaner, "clean_with_preserved", None)
+                    if clean_with_preserved is not None:
+                        # A redirect may have changed the hostname during this pass.
+                        # Resolve functional exceptions against the current target.
+                        domain_cleaners = self._registry.get_cleaners_for(next_url)
+                        callbacks = [
+                            c.preserves_query_key for c in domain_cleaners
+                            if hasattr(c, "preserves_query_key")
+                        ]
+                        candidate = clean_with_preserved(
+                            next_url,
+                            lambda key, target=next_url, keepers=callbacks: any(
+                                keep(target, key) for keep in keepers
+                            ),
+                        )
+                    else:
+                        candidate = cleaner.clean(next_url)
+                except Exception as error:
+                    logger.error("Cleaner %s failed (%s)", cleaner.id, type(error).__name__)
                     continue
                 if candidate and candidate != next_url:
                     next_url = candidate
@@ -69,6 +85,6 @@ class CleanerService:
         if self._cache_set is not None:
             try:
                 self._cache_set(url, current)
-            except Exception:
-                logger.exception("Cleaner cache set failed")
+            except Exception as error:
+                logger.error("Cleaner cache set failed (%s)", type(error).__name__)
         return current

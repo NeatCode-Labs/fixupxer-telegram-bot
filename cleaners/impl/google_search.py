@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import urllib.parse
+from ipaddress import IPv6Address
 
 from ..base import CleanerCategory, CleanerUtils, UrlCleaner
 
@@ -49,10 +50,41 @@ _PRESERVE = frozenset({
     "imgsz", "imgtype", "imgc", "gl", "cr",
 })
 
-_REDIRECT_PATTERNS = (
-    re.compile(r"[?&]url=([^&]+)"),
-    re.compile(r"[?&]q=([^&]+)"),
-)
+_EXACT_HOSTS = frozenset(_DOMAINS) | frozenset("www." + domain for domain in _DOMAINS)
+_INVALID_ESCAPE = re.compile(r"%(?![0-9a-fA-F]{2})")
+_INVALID_URL_CHAR = re.compile(r"[\x00-\x20\x7f\\]")
+_HOST_LABEL = re.compile(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?")
+
+
+def _parse_http_url(url: str) -> urllib.parse.SplitResult | None:
+    """Validate structure without decoding or canonicalising URL components."""
+    if _INVALID_ESCAPE.search(url) or _INVALID_URL_CHAR.search(url):
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return None
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        if parsed.netloc.endswith(":") or parsed.port == 0:
+            return None
+        host = parsed.hostname
+        if ":" in host:
+            IPv6Address(host)
+        else:
+            ascii_host = host.encode("idna").decode("ascii").removesuffix(".")
+            if len(ascii_host) > 253 or not all(
+                _HOST_LABEL.fullmatch(label) for label in ascii_host.split(".")
+            ):
+                return None
+        return parsed
+    except (ValueError, UnicodeError):
+        return None
+
+
+def _is_google_endpoint(parsed: urllib.parse.SplitResult) -> bool:
+    return (parsed.hostname in _EXACT_HOSTS
+            and parsed.port in {None, 80 if parsed.scheme == "http" else 443})
 
 
 class _GoogleSearchCleaner(UrlCleaner):
@@ -60,16 +92,19 @@ class _GoogleSearchCleaner(UrlCleaner):
     category = CleanerCategory.SEARCH_ENGINES
 
     def matches(self, url: str) -> bool:
-        if not CleanerUtils.host_matches(url, _DOMAINS):
-            return False
-        lower = url.lower()
-        return "/url?" in lower or "/search?" in lower
+        parsed = _parse_http_url(url)
+        return bool(parsed and _is_google_endpoint(parsed)
+                    and parsed.path in {"/url", "/search"})
+
+    def preserves_query_key(self, url: str, key: str) -> bool:
+        return key in _PRESERVE
 
     def clean(self, url: str) -> str:
-        if "/url?" in url:
-            redirected = self._extract_redirect(url)
-            if redirected:
-                return redirected
+        if not self.matches(url):
+            return url
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.path == "/url":
+            return self._extract_redirect(url) or url
         if "?" not in url:
             return url
 
@@ -78,22 +113,27 @@ class _GoogleSearchCleaner(UrlCleaner):
                 return pair
             if key in _TRACKING:
                 return None
-            return None
+            return pair
         return CleanerUtils.filter_query(url, decide)
 
     @staticmethod
     def _extract_redirect(url: str) -> str | None:
-        for pat in _REDIRECT_PATTERNS:
-            m = pat.search(url)
-            if not m:
-                continue
-            try:
-                decoded = urllib.parse.unquote(m.group(1))
-            except Exception:
-                continue
-            if decoded.startswith("http://") or decoded.startswith("https://"):
-                return decoded
-        return None
+        parsed = _parse_http_url(url)
+        if not parsed or not _is_google_endpoint(parsed) or parsed.path != "/url":
+            return None
+        targets = []
+        for pair in parsed.query.split("&"):
+            key, separator, value = pair.partition("=")
+            if CleanerUtils.decode_query_key(key) in {"q", "url"}:
+                targets.append(value if separator else "")
+        # Conflicting, repeated or empty target parameters are ambiguous.
+        if len(targets) != 1 or not targets[0]:
+            return None
+        try:
+            decoded = urllib.parse.unquote(targets[0], errors="strict")
+        except UnicodeDecodeError:
+            return None
+        return decoded if _parse_http_url(decoded) is not None else None
 
 
 GoogleSearchCleaner = _GoogleSearchCleaner()

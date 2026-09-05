@@ -58,7 +58,6 @@ InstagramCleaner = AggressiveCleaner(
     category=CleanerCategory.SOCIAL_MEDIA,
     domains=(
         "instagram.com",
-        "kkinstagram.com",
         "eeinstagram.com",
         "instagram7.com",
         "ddinstagram.com",
