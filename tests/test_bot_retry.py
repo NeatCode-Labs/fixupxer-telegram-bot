@@ -41,8 +41,8 @@ def _prepare_x_retry(text=None):
     return update, context, sent, token, callback_update, query
 
 
-def _prepare_ig_retry():
-    update, context = _incoming("https://instagram.com/p/Throttle/?igsh=tracking")
+def _prepare_ig_retry(text=None):
+    update, context = _incoming(text or "https://instagram.com/p/Throttle/?igsh=tracking")
     _run(bot.process_message(update, context))
     sent = context.bot.send_message.await_args.kwargs
     token = _token_from_sent(sent)
@@ -219,16 +219,17 @@ def test_failed_edit_does_not_advance_state_or_retry_ambiguous_network_error(mon
     edit = AsyncMock(side_effect=NetworkError("ambiguous"))
     context.bot.edit_message_text = edit
     state = bot._retry_states[token]
-    current_used = set(state.used_targets)
+    current_fixed = state.fixed_url
 
     _run(bot.retry_callback(callback_update, context))
     assert edit.await_count == 1
-    assert state.used_targets == current_used
+    assert state.fixed_url == current_fixed
 
     edit.side_effect = None
     second_update, _ = _callback(update, token)
     _run(bot.retry_callback(second_update, context))
     assert edit.await_count == 2
+    assert state.fixed_url != current_fixed
     assert edit.await_args_list[0].kwargs["link_preview_options"].url == edit.await_args_list[1].kwargs["link_preview_options"].url
 
 
@@ -240,14 +241,15 @@ def test_noop_edit_after_ambiguous_failure_confirms_and_advances(monkeypatch):
     ])
     context.bot.edit_message_text = edit
     state = bot._retry_states[token]
-    current_used = set(state.used_targets)
+    current_fixed = state.fixed_url
 
     _run(bot.retry_callback(callback_update, context))
+    assert state.fixed_url == current_fixed
     second_update, _ = _callback(update, token)
     _run(bot.retry_callback(second_update, context))
 
     assert edit.await_count == 2
-    assert state.used_targets != current_used
+    assert state.fixed_url != current_fixed
     assert "fxtwitter.com" in state.fixed_url
 
 
@@ -260,13 +262,13 @@ def test_explicit_retry_after_is_bounded_and_advances_only_after_success(monkeyp
         RetryAfter(timedelta(seconds=2)), SimpleNamespace(message_id=101),
     ])
     state = bot._retry_states[token]
-    current_used = set(state.used_targets)
+    current_fixed = state.fixed_url
 
     _run(bot.retry_callback(callback_update, context))
 
     assert context.bot.edit_message_text.await_count == 2
     sleep.assert_awaited_once_with(2.1)
-    assert state.used_targets != current_used
+    assert state.fixed_url != current_fixed
 
 
 def test_excessive_retry_after_is_not_retried_or_advanced(monkeypatch):
@@ -276,13 +278,13 @@ def test_excessive_retry_after_is_not_retried_or_advanced(monkeypatch):
     monkeypatch.setattr(bot.asyncio, "sleep", sleep)
     context.bot.edit_message_text = AsyncMock(side_effect=RetryAfter(31))
     state = bot._retry_states[token]
-    current_used = set(state.used_targets)
+    current_fixed = state.fixed_url
 
     _run(bot.retry_callback(callback_update, context))
 
     assert context.bot.edit_message_text.await_count == 1
     sleep.assert_not_awaited()
-    assert state.used_targets == current_used
+    assert state.fixed_url == current_fixed
 
 
 def test_default_click_throttle_rejects_an_immediate_repeat(monkeypatch):
@@ -353,22 +355,66 @@ def test_concurrent_and_repeated_clicks_are_throttled(monkeypatch):
     assert second_query.answer.await_count == 1
 
 
-def test_exhaustion_removes_keyboard_and_does_not_send_or_track_again(monkeypatch):
+def test_instagram_retry_cycles_through_all_targets_and_keeps_button(monkeypatch):
     monkeypatch.setattr(bot, "_RETRY_MIN_INTERVAL_SECONDS", 0)
-    update, context, _, token, callback_update, _ = _prepare_x_retry()
+    update, context, sent, token, _, _ = _prepare_ig_retry(
+        "Keep this caption https://instagram.com/p/Cycle/?igsh=tracking&img_index=2#comments"
+    )
     context.bot.edit_message_text = AsyncMock(return_value=SimpleNamespace(message_id=101))
-    _run(bot.retry_callback(callback_update, context))
-    assert context.bot.edit_message_text.await_args.kwargs["reply_markup"] is None
-
     tracker = AsyncMock()
     monkeypatch.setattr(bot, "track_conversion", tracker)
-    second_update, second_query = _callback(update, token)
-    _run(bot.retry_callback(second_update, context))
+    expected_hosts = [
+        bot.IG_PROXY_ORDER[1], bot.IG_PROXY_ORDER[2],
+        bot.IG_PROXY_ORDER[0], bot.IG_PROXY_ORDER[1],
+    ]
+    state = bot._retry_states[token]
+    queries = []
+    for expected_host in expected_hosts:
+        callback_update, query = _callback(update, token)
+        _run(bot.retry_callback(callback_update, context))
+        queries.append(query)
+        edited = context.bot.edit_message_text.await_args_list[-1].kwargs
+        assert edited["message_id"] == 101
+        assert edited["chat_id"] == update.effective_chat.id
+        assert edited["link_preview_options"].url == f"https://{expected_host}/p/Cycle/?img_index=2#comments"
+        assert state.fixed_url == edited["link_preview_options"].url
+        assert edited["reply_markup"] is not None
+        assert "Keep this caption" in edited["text"]
+        assert "Originally posted by" in edited["text"]
 
+    assert sent["reply_markup"] is not None
     assert context.bot.send_message.await_count == 1
-    assert context.bot.edit_message_text.await_count == 1
+    assert context.bot.edit_message_text.await_count == len(expected_hosts)
     tracker.assert_not_awaited()
-    assert second_query.answer.await_count == 1
+    assert all(query.answer.await_count == 1 for query in queries)
+    assert update.message.delete.await_count == 1
+
+
+def test_x_retry_cycles_after_full_round_without_new_send_or_tracking(monkeypatch):
+    monkeypatch.setattr(bot, "_RETRY_MIN_INTERVAL_SECONDS", 0)
+    update, context, sent, token, _, _ = _prepare_x_retry()
+    context.bot.edit_message_text = AsyncMock(return_value=SimpleNamespace(message_id=101))
+    tracker = AsyncMock()
+    monkeypatch.setattr(bot, "track_conversion", tracker)
+    expected_hosts = ["fxtwitter.com", "fixupx.com", "fxtwitter.com"]
+    state = bot._retry_states[token]
+    queries = []
+    for expected_host in expected_hosts:
+        callback_update, query = _callback(update, token)
+        _run(bot.retry_callback(callback_update, context))
+        queries.append(query)
+        edited = context.bot.edit_message_text.await_args_list[-1].kwargs
+        assert edited["message_id"] == 101
+        assert edited["link_preview_options"].url.startswith(f"https://{expected_host}/")
+        assert state.fixed_url == edited["link_preview_options"].url
+        assert edited["reply_markup"] is not None
+
+    assert sent["reply_markup"] is not None
+    assert context.bot.send_message.await_count == 1
+    assert context.bot.edit_message_text.await_count == len(expected_hosts)
+    tracker.assert_not_awaited()
+    assert all(query.answer.await_count == 1 for query in queries)
+    assert update.message.delete.await_count == 1
 
 
 def test_single_roster_and_other_platforms_have_no_retry_button(monkeypatch):

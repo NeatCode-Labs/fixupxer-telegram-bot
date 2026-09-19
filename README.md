@@ -6,13 +6,19 @@ A Telegram bot that removes known tracking parameters from URLs and converts X/T
   <img src="fixupxer_round.png" alt="FixupXer Bot Logo" width="150">
 </p>
 
+## Changes in 0.4.1 (2026-09-20)
+
+**Try another proxy** now cycles through the configured frontends and stays available after a complete cycle. You can return to a proxy that showed a working preview instead of getting stuck on the last alternative. The same message, text and attribution are preserved; ownership checks, click throttling and the 24-hour button lifetime still apply.
+
+Buttons from before a bot restart require resending the original link. An old repost whose button already disappeared is not modified automatically.
+
 ## Changes in 0.4.0 (2026-09-20)
 
 Reposts now explicitly tell Telegram to use the cleaned or converted URL for the link preview. Links in quoted user text and the original/fallback links no longer decide the preview target.
 
 A **Try another proxy** button on eligible X/Twitter, Instagram and TikTok reposts switches the existing message to a different configured frontend. The original poster or a group administrator can use it; message text, attribution and topic stay intact. The button requests another service directly instead of assuming the health probe can predict Telegram's preview. It cannot guarantee an embed when Telegram or the available services cannot produce one.
 
-Buttons apply to new reposts, expire after 24 hours, and become unavailable after a bot restart or cache eviction. The retry cache is bounded to 5,000 reposts and is kept only in memory. Resend the link if a button has expired. The button disappears once all configured alternatives have been tried. A platform needs at least two configured frontends for a retry button; Facebook and cleanup-only links do not receive one.
+Buttons apply to new reposts, expire after 24 hours, and become unavailable after a bot restart or cache eviction. The retry cache is bounded to 5,000 reposts and is kept only in memory. Resend the link if a button has expired. Version 0.4.0 removed the button after all alternatives were tried; 0.4.1 fixes this by cycling through them. A platform needs at least two configured frontends for a retry button; Facebook and cleanup-only links do not receive one.
 
 ## Changes in 0.3.2 (2026-09-05)
 

@@ -10,7 +10,7 @@ import secrets
 import sqlite3
 import time
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
 from html import escape as html_escape
 
 from telegram import (
@@ -1257,7 +1257,6 @@ class _RetryState:
     original_url: str
     user_text: str
     proxy_targets: tuple[str, ...]
-    used_targets: set[str] = field(default_factory=set)
     last_click_at: float = 0.0
     in_flight: bool = False
 
@@ -1303,29 +1302,9 @@ def _new_retry_state(
     username: str, fixed_url: str, clean_url: str | None, original_url: str,
     user_text: str, token: str | None = None,
 ) -> _RetryState | None:
-    configured_targets = _retry_proxy_targets(platform, fixed_url)
-    if len(configured_targets) < 2:
+    targets = _retry_proxy_targets(platform, fixed_url)
+    if len(targets) < 2:
         return None
-    parsed_host = (urllib.parse.urlparse(fixed_url).hostname or "").lower().rstrip(".")
-    current_key = _retry_target_key(platform, parsed_host)
-    current_index = next(
-        (
-            index for index, target in enumerate(configured_targets)
-            if _retry_target_key(platform, target) == current_key
-        ),
-        None,
-    )
-    if current_index is None:
-        targets = configured_targets
-    else:
-        # The first manual retry is the next configured target after the one
-        # that was actually sent; subsequent clicks continue in this order.
-        targets = configured_targets[current_index + 1:] + configured_targets[:current_index + 1]
-    used = {
-        _retry_target_key(platform, target)
-        for target in targets
-        if _retry_target_key(platform, target) == current_key
-    }
     _prune_retry_states()
     token = token or _allocate_retry_token()
     return _RetryState(
@@ -1341,7 +1320,6 @@ def _new_retry_state(
         original_url=original_url,
         user_text=user_text,
         proxy_targets=targets,
-        used_targets=used,
     )
 
 
@@ -1378,15 +1356,27 @@ def _clear_retry_states_for_message(chat_id: int, bot_message_id: int) -> None:
             _retry_states.pop(token, None)
 
 
-def _retry_remaining_targets(state: _RetryState) -> list[str]:
+def _retry_alternative_targets(state: _RetryState) -> list[str]:
+    """Cycle after the current proxy, including previously tried alternatives."""
+    current_key = _retry_target_key(
+        state.platform, urllib.parse.urlparse(state.fixed_url).hostname or "",
+    )
+    targets = state.proxy_targets
+    current_index = next(
+        (index for index, target in enumerate(targets)
+         if _retry_target_key(state.platform, target) == current_key),
+        None,
+    )
+    if current_index is not None:
+        targets = targets[current_index + 1:] + targets[:current_index + 1]
     return [
-        target for target in state.proxy_targets
-        if _retry_target_key(state.platform, target) not in state.used_targets
+        target for target in targets
+        if _retry_target_key(state.platform, target) != current_key
     ]
 
 
 def _retry_markup(state: _RetryState) -> InlineKeyboardMarkup | None:
-    if not _retry_remaining_targets(state):
+    if not _retry_alternative_targets(state):
         return None
     return InlineKeyboardMarkup([[InlineKeyboardButton(
         "Try another proxy", callback_data=f"{_RETRY_CALLBACK_PREFIX}{state.token}",
@@ -1951,13 +1941,12 @@ async def retry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if now - state.last_click_at < _RETRY_MIN_INTERVAL_SECONDS:
         await _answer_callback(query, "Please wait before trying another proxy.")
         return
-    remaining = _retry_remaining_targets(state)
-    if not remaining:
+    alternatives = _retry_alternative_targets(state)
+    if not alternatives:
         await _answer_callback(query, "No other configured proxy is available.")
         return
 
-    target = remaining[0]
-    target_key = _retry_target_key(state.platform, target)
+    target = alternatives[0]
     new_fixed_url = _retry_url(state, target)
     new_text = _build_message(
         state.platform, state.username, new_fixed_url, state.clean_url,
@@ -1975,23 +1964,7 @@ async def retry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             message_id=state.bot_message_id,
             text=new_text,
             preview_url=new_fixed_url,
-            reply_markup=_retry_markup(
-                _RetryState(
-                    token=state.token,
-                    created_at=state.created_at,
-                    chat_id=state.chat_id,
-                    bot_message_id=state.bot_message_id,
-                    owner_id=state.owner_id,
-                    platform=state.platform,
-                    username=state.username,
-                    fixed_url=new_fixed_url,
-                    clean_url=state.clean_url,
-                    original_url=state.original_url,
-                    user_text=state.user_text,
-                    proxy_targets=state.proxy_targets,
-                    used_targets=state.used_targets | {target_key},
-                )
-            ),
+            reply_markup=_retry_markup(replace(state, fixed_url=new_fixed_url)),
         )
     except RetryAfter:
         state.last_click_at = now
@@ -2020,7 +1993,6 @@ async def retry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Advance only after Telegram confirmed the edit.  A failed or ambiguous
     # request therefore leaves the same target available for an explicit retry.
-    state.used_targets.add(target_key)
     state.fixed_url = new_fixed_url
     state.last_click_at = now
     if _retry_states.get(state.token) is state:
