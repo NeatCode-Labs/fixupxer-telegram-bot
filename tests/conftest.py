@@ -31,6 +31,7 @@ def isolate_bot(monkeypatch, tmp_path):
     monkeypatch.setattr(bot, "_SEND_INTERVAL_GROUP", 0)
     monkeypatch.setattr(bot, "_SEND_INTERVAL_PRIVATE", 0)
     bot.user_message_map.clear()
+    bot._retry_states.clear()
     bot._last_repost_at.clear()
     bot._CLEAN_CACHE.clear()
     bot.cleaner_engine.DEFAULT_REGISTRY.configure_proxy_domains(

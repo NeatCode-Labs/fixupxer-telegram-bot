@@ -6,6 +6,14 @@ A Telegram bot that removes known tracking parameters from URLs and converts X/T
   <img src="fixupxer_round.png" alt="FixupXer Bot Logo" width="150">
 </p>
 
+## Changes in 0.4.0 (2026-09-20)
+
+Reposts now explicitly tell Telegram to use the cleaned or converted URL for the link preview. Links in quoted user text and the original/fallback links no longer decide the preview target.
+
+A **Try another proxy** button on eligible X/Twitter, Instagram and TikTok reposts switches the existing message to a different configured frontend. The original poster or a group administrator can use it; message text, attribution and topic stay intact. The button requests another service directly instead of assuming the health probe can predict Telegram's preview. It cannot guarantee an embed when Telegram or the available services cannot produce one.
+
+Buttons apply to new reposts, expire after 24 hours, and become unavailable after a bot restart or cache eviction. The retry cache is bounded to 5,000 reposts and is kept only in memory. Resend the link if a button has expired. The button disappears once all configured alternatives have been tried. A platform needs at least two configured frontends for a retry button; Facebook and cleanup-only links do not receive one.
+
 ## Changes in 0.3.2 (2026-09-05)
 
 Instagram cleaning now removes the `stkn` share parameter from Instagram URLs and recognised or configured Instagram proxy URLs. For example, `https://www.instagram.com/reel/Dc4fAOCs97R/?stkn=anBpYnlkeG82MDJz` cleans to `https://www.instagram.com/reel/Dc4fAOCs97R/` before frontend conversion.
@@ -22,6 +30,8 @@ Unknown and functional parameters, such as `img_index` and `story_media_id`, rem
 - 🎯 **Prefers direct‑serving proxies**: A proxy that 302s back to `instagram.com` (common for `/reel/` paths) is only used as a last resort — the bot keeps probing for a proxy that serves the embed itself, because Telegram doesn't render previews for plain `instagram.com` links
 - ♻️ **Migrates recognised legacy proxy URLs**: Known legacy Instagram and TikTok hosts can be redirected to the configured active roster; retired unsafe frontends are excluded
 - 🤫 **No spam on already‑clean URLs**: If the cleaner engine and domain rewrite both leave the URL unchanged, the bot stays silent
+- 🎯 **Explicit preview target**: Requests the converted link preview even when the repost contains other links
+- 🔘 **Try another proxy**: The original poster or a group admin can switch eligible X/Instagram/TikTok reposts to another frontend in place
 - 📝 **Preserves Original Text**: Includes surrounding text in the first successful repost; retains the original if complete delivery cannot be confirmed
 - 🧵 **Forum Topics**: Keeps reposts in the incoming message's Telegram topic
 - 🏷️ **Attribution**: Names the original poster in the repost; Telegram displays the repost's time
@@ -264,6 +274,8 @@ Unless statistics are disabled, FixupXer keeps a local SQLite database (`bot_sta
 * **users** – `user_id`, `username`, first/last names, timestamps.
 * **conversions** – timestamp, `user_id`, `chat_id`. The existing `original_url` and `converted_url` columns are retained for compatibility, but new records write `NULL` to both.
 * **delete_tokens** – `(chat_id, bot_message_id)`, original poster's `user_id` and a timestamp, used to authorise `/delete` after restarts. Tokens older than 24 hours are pruned when a new token is saved.
+
+To support proxy retry, a bounded in-memory cache holds the rendered repost context and URLs for active buttons. Button validity is limited to 24 hours; a restart or cache eviction invalidates the button. This context is not written to the statistics database.
 
 The database does not save full message text or media. It does retain Telegram IDs, profile fields, chat titles and usage timestamps, which can be personal data. Existing conversion rows may still contain URLs written by older versions. Upgrading does not erase those rows, existing backups or earlier log files, and there is no automatic retention policy for usage statistics.
 

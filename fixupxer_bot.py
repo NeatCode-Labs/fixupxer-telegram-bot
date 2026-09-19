@@ -6,12 +6,19 @@ import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import time
 import urllib.parse
+from dataclasses import dataclass, field
 from html import escape as html_escape
 
-from telegram import Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LinkPreviewOptions,
+    Update,
+)
 from telegram.error import (
     BadRequest,
     Conflict,
@@ -22,6 +29,7 @@ from telegram.error import (
 )
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -1222,6 +1230,208 @@ def _build_message(platform: str, username: str, fixed_url: str, clean_url: str 
     )
     return msg
 
+
+# Retry controls are deliberately ephemeral.  The callback token never carries
+# a URL or a target proxy; all routing data stays in this bounded in-memory
+# record and disappears on restart or after one day.
+_RETRY_CALLBACK_PREFIX = "fxr:"
+_RETRY_STATE_TTL_SECONDS = 24 * 60 * 60
+_RETRY_STATE_MAX = 5000
+_RETRY_MIN_INTERVAL_SECONDS = 1.0
+_RETRY_EDIT_RETRY_LIMIT = 1
+_RETRY_MAX_RETRY_AFTER = 30.0
+_X_PROXY_TARGETS = ("fixupx.com", "fxtwitter.com")
+
+
+@dataclass
+class _RetryState:
+    token: str
+    created_at: float
+    chat_id: int
+    bot_message_id: int
+    owner_id: int
+    platform: str
+    username: str
+    fixed_url: str
+    clean_url: str | None
+    original_url: str
+    user_text: str
+    proxy_targets: tuple[str, ...]
+    used_targets: set[str] = field(default_factory=set)
+    last_click_at: float = 0.0
+    in_flight: bool = False
+
+
+_retry_states: "collections.OrderedDict[str, _RetryState]" = collections.OrderedDict()
+
+
+def _retry_target_key(platform: str, target: str) -> str:
+    target = target.lower().rstrip(".")
+    if platform == PLATFORM_INSTAGRAM and target.startswith("www."):
+        return target[4:]
+    return target
+
+
+def _retry_proxy_targets(platform: str, fixed_url: str) -> tuple[str, ...]:
+    """Return the configured alternatives while preserving TikTok prefixes."""
+    if platform == PLATFORM_X:
+        return _X_PROXY_TARGETS
+    if platform == PLATFORM_INSTAGRAM:
+        return tuple(
+            proxy[4:] if proxy.lower().startswith("www.") else proxy
+            for proxy in IG_PROXY_ORDER
+        )
+    if platform != PLATFORM_TIKTOK:
+        return ()
+
+    host = (urllib.parse.urlparse(fixed_url).hostname or "").lower().rstrip(".")
+    for proxy in tuple(TIKTOK_PROXY_ORDER) + _TIKTOK_PROXY_DOMAINS + _TIKTOK_LEGACY_PROXIES:
+        proxy = proxy.lower().rstrip(".")
+        if host == proxy:
+            prefix = ""
+            break
+        if host.endswith("." + proxy):
+            prefix = host[:-len(proxy)]
+            break
+    else:
+        prefix = ""
+    return tuple(prefix + proxy for proxy in TIKTOK_PROXY_ORDER)
+
+
+def _new_retry_state(
+    *, chat_id: int, bot_message_id: int, owner_id: int, platform: str,
+    username: str, fixed_url: str, clean_url: str | None, original_url: str,
+    user_text: str, token: str | None = None,
+) -> _RetryState | None:
+    configured_targets = _retry_proxy_targets(platform, fixed_url)
+    if len(configured_targets) < 2:
+        return None
+    parsed_host = (urllib.parse.urlparse(fixed_url).hostname or "").lower().rstrip(".")
+    current_key = _retry_target_key(platform, parsed_host)
+    current_index = next(
+        (
+            index for index, target in enumerate(configured_targets)
+            if _retry_target_key(platform, target) == current_key
+        ),
+        None,
+    )
+    if current_index is None:
+        targets = configured_targets
+    else:
+        # The first manual retry is the next configured target after the one
+        # that was actually sent; subsequent clicks continue in this order.
+        targets = configured_targets[current_index + 1:] + configured_targets[:current_index + 1]
+    used = {
+        _retry_target_key(platform, target)
+        for target in targets
+        if _retry_target_key(platform, target) == current_key
+    }
+    _prune_retry_states()
+    token = token or _allocate_retry_token()
+    return _RetryState(
+        token=token,
+        created_at=time.monotonic(),
+        chat_id=chat_id,
+        bot_message_id=bot_message_id,
+        owner_id=owner_id,
+        platform=platform,
+        username=username,
+        fixed_url=fixed_url,
+        clean_url=clean_url,
+        original_url=original_url,
+        user_text=user_text,
+        proxy_targets=targets,
+        used_targets=used,
+    )
+
+
+def _prune_retry_states(now: float | None = None) -> None:
+    now = time.monotonic() if now is None else now
+    expired = [
+        token for token, state in _retry_states.items()
+        if now - state.created_at >= _RETRY_STATE_TTL_SECONDS
+    ]
+    for token in expired:
+        _retry_states.pop(token, None)
+    while len(_retry_states) > _RETRY_STATE_MAX:
+        _retry_states.popitem(last=False)
+
+
+def _store_retry_state(state: _RetryState) -> None:
+    _prune_retry_states()
+    _retry_states[state.token] = state
+    _retry_states.move_to_end(state.token)
+    _prune_retry_states()
+
+
+def _get_retry_state(token: str) -> _RetryState | None:
+    _prune_retry_states()
+    state = _retry_states.get(token)
+    if state is not None:
+        _retry_states.move_to_end(token)
+    return state
+
+
+def _clear_retry_states_for_message(chat_id: int, bot_message_id: int) -> None:
+    for token, state in list(_retry_states.items()):
+        if state.chat_id == chat_id and state.bot_message_id == bot_message_id:
+            _retry_states.pop(token, None)
+
+
+def _retry_remaining_targets(state: _RetryState) -> list[str]:
+    return [
+        target for target in state.proxy_targets
+        if _retry_target_key(state.platform, target) not in state.used_targets
+    ]
+
+
+def _retry_markup(state: _RetryState) -> InlineKeyboardMarkup | None:
+    if not _retry_remaining_targets(state):
+        return None
+    return InlineKeyboardMarkup([[InlineKeyboardButton(
+        "Try another proxy", callback_data=f"{_RETRY_CALLBACK_PREFIX}{state.token}",
+    )]])
+
+
+def _allocate_retry_token() -> str:
+    _prune_retry_states()
+    token = secrets.token_urlsafe(18)
+    while token in _retry_states:
+        token = secrets.token_urlsafe(18)
+    return token
+
+
+def _initial_retry_markup(platform: str, fixed_url: str) -> tuple[str | None, InlineKeyboardMarkup | None]:
+    targets = _retry_proxy_targets(platform, fixed_url)
+    if len(targets) < 2:
+        return None, None
+    current = _retry_target_key(
+        platform, (urllib.parse.urlparse(fixed_url).hostname or ""),
+    )
+    if all(_retry_target_key(platform, target) == current for target in targets):
+        return None, None
+    token = _allocate_retry_token()
+    return token, InlineKeyboardMarkup([[InlineKeyboardButton(
+        "Try another proxy", callback_data=f"{_RETRY_CALLBACK_PREFIX}{token}",
+    )]])
+
+
+def _retry_url(state: _RetryState, target: str) -> str:
+    parsed = urllib.parse.urlparse(state.fixed_url)
+    return urllib.parse.urlunparse((
+        parsed.scheme or "https",
+        target,
+        parsed.path,
+        parsed.params,
+        parsed.query,
+        parsed.fragment,
+    ))
+
+
+def _is_message_not_modified(error: BadRequest) -> bool:
+    """Telegram's no-op edit response can confirm an ambiguous earlier edit."""
+    return "message is not modified" in str(error).lower()
+
 # ------------------------ PLATFORM IDENTIFICATION --------------------
 
 # Strict eTLD-aware match: a netloc matches if it is the host itself OR a
@@ -1321,15 +1531,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
         return  # e.g. channel post or edited message
     await update.message.reply_text(
-        "🤖 <b>Hi! I'm FixupXer bot.</b>\n\n"
-        "I automatically <b>clean</b> tracking parameters and <b>convert</b> social-media links so they embed beautifully in Telegram.\n\n"
-        "🔄 <b>X/Twitter</b>: x.com / twitter.com → fixupx.com / fxtwitter.com\n"
-        "📸 <b>Instagram</b>: instagram.com → healthiest embed proxy (toinstagram.com, adamlikes.men, …)\n"
-        "🎵 <b>TikTok</b>: tiktok.com → tnktok.com\n"
-        "📘 <b>Facebook</b>: tracking cleanup, original domain preserved\n\n"
-        "I remove known tracking parameters while keeping functional and unknown parameters. Embed previews depend on third-party services.\n\n"
-        "Add me to your group and I'll take care of every supported link automatically.\n\n"
-        "The original poster or a group admin can request removal of my repost by replying with /delete, subject to Telegram's deletion limits.",
+        "🤖 <b>FixupXer</b> cleans tracking links and converts supported social links for Telegram previews.\n\n"
+        "🔄 X/Twitter → fixupx.com or fxtwitter.com\n"
+        "📸 Instagram and 🎵 TikTok → a configured embed proxy\n"
+        "📘 Facebook and other supported sites → tracking cleanup\n\n"
+        "Functional parameters stay intact. Preview availability depends on Telegram and the selected proxy.\n"
+        "When a repost has alternatives, use <b>Try another proxy</b> to edit that same repost.\n\n"
+        "Add me to a group and send a link. The original poster or a group admin can remove my repost with /delete.",
         parse_mode="HTML"
     )
 
@@ -1338,23 +1546,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if update.message is None:
         return
     await update.message.reply_text(
-        "📝 <b>FixupXer bot – Help</b>\n\n"
-        "Simply add me to any chat. Whenever someone posts a supported link, I'll: \n"
-        "1. Repost up to three cleaned or converted links, in the same topic.\n"
-        "2. Remove the original only after safe, complete delivery (needs admin rights).\n"
-        "If delivery fails or the text is too long, I keep the original.\n\n"
-        "<b>Supported platforms</b>:\n"
-        "🔄 <b>X/Twitter</b>: x.com / twitter.com → fixupx.com / fxtwitter.com\n"
-        "📸 <b>Instagram</b>: instagram.com → healthiest embed proxy (toinstagram.com, adamlikes.men, …)\n"
-        "🎵 <b>TikTok</b>: tiktok.com → tnktok.com\n"
-        "📘 <b>Facebook</b>: tracking cleanup, original domain preserved\n\n"
-        "Unknown and functional URL parameters are preserved. Preview availability depends on third-party services.\n\n"
-        "<b>Commands</b>:\n"
-        "• /start – Show welcome information\n"
-        "• /help – Show this message\n"
-        "• /stats – Bot usage statistics (admins)\n"
-        "• /delete – Original poster/Admin can delete my repost\n\n"
-        "Need more info? Check the README or open an issue on GitHub.",
+        "📝 <b>FixupXer help</b>\n\n"
+        "Send a supported URL in a chat. I clean known tracking parameters, convert X/Twitter, Instagram and TikTok links, and preserve functional parameters.\n\n"
+        "Each repost keeps its topic and preview target. Preview availability depends on Telegram and the selected proxy. If alternatives are configured, <b>Try another proxy</b> edits the same repost; only the original poster or a chat admin may use it.\n\n"
+        "I repost up to three links and delete the original only after complete delivery. Long or failed deliveries keep the original.\n\n"
+        "<b>Commands</b>\n"
+        "• /start – Welcome\n"
+        "• /help – This help\n"
+        "• /delete – Delete a repost (original poster/admin)\n"
+        "• /stats – Usage statistics (admins)",
         parse_mode="HTML"
     )
 
@@ -1482,6 +1682,9 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if is_original_poster or is_admin:
             await context.bot.delete_message(chat_id=chat_id, message_id=bot_message_id)
+            # The repost is gone even if Telegram rejects deletion of the
+            # command itself; invalidate its retry token immediately.
+            _clear_retry_states_for_message(chat_id, bot_message_id)
             try:
                 await update.message.delete()
             except TelegramError as e:
@@ -1620,7 +1823,10 @@ def _remember_poster(chat_id: int, message_id: int, user_id: int) -> None:
     user_message_map[key] = user_id
 
 
-async def _send_repost(bot, chat, text: str, thread_id: int | None):
+async def _send_repost(
+    bot, chat, text: str, thread_id: int | None, preview_url: str | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+):
     """Space reposts and retry explicit flood control, never ambiguous timeouts."""
     interval = _SEND_INTERVAL_PRIVATE if chat.type == "private" else _SEND_INTERVAL_GROUP
     elapsed = time.monotonic() - _last_repost_at.get(chat.id, -float("inf"))
@@ -1628,10 +1834,14 @@ async def _send_repost(bot, chat, text: str, thread_id: int | None):
         await asyncio.sleep(interval - elapsed)
     kwargs = {
         "chat_id": chat.id, "text": text, "parse_mode": "MarkdownV2",
-        "disable_web_page_preview": False,
+        "link_preview_options": LinkPreviewOptions(
+            url=preview_url, is_disabled=False,
+        ),
     }
     if thread_id is not None:
         kwargs["message_thread_id"] = thread_id
+    if reply_markup is not None:
+        kwargs["reply_markup"] = reply_markup
     for attempt in range(_SEND_RETRY_LIMIT + 1):
         try:
             result = await bot.send_message(**kwargs)
@@ -1648,6 +1858,174 @@ async def _send_repost(bot, chat, text: str, thread_id: int | None):
             logger.warning("Telegram flood control; retrying a repost")
             await asyncio.sleep(max(0, seconds) + 0.1)
     raise RuntimeError("Unreachable retry state")
+
+
+async def _edit_repost(
+    bot, *, chat_id: int, message_id: int, text: str, preview_url: str,
+    reply_markup: InlineKeyboardMarkup | None,
+):
+    """Edit a retry repost, retrying only explicit bounded flood-control errors."""
+    kwargs = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "MarkdownV2",
+        "link_preview_options": LinkPreviewOptions(
+            url=preview_url, is_disabled=False,
+        ),
+        "reply_markup": reply_markup,
+    }
+    for attempt in range(_RETRY_EDIT_RETRY_LIMIT + 1):
+        try:
+            return await bot.edit_message_text(**kwargs)
+        except RetryAfter as error:
+            delay = error.retry_after
+            seconds = delay.total_seconds() if hasattr(delay, "total_seconds") else float(delay)
+            if attempt == _RETRY_EDIT_RETRY_LIMIT or seconds > _RETRY_MAX_RETRY_AFTER:
+                raise
+            logger.warning("Telegram flood control; retrying a proxy edit")
+            await asyncio.sleep(max(0, seconds) + 0.1)
+    raise RuntimeError("Unreachable retry edit state")
+
+
+async def _answer_callback(query, text: str) -> None:
+    try:
+        await query.answer(text)
+    except TelegramError:
+        # A stale callback can outlive Telegram's answer window.  It must not
+        # turn into a message edit or an unhandled update exception.
+        logger.debug("Callback answer was no longer available")
+
+
+async def retry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Switch one repost to the next configured proxy in the same message."""
+    query = update.callback_query
+    if query is None:
+        return
+    data = query.data or ""
+    if not data.startswith(_RETRY_CALLBACK_PREFIX):
+        await _answer_callback(query, "This retry button is no longer valid.")
+        return
+    token = data[len(_RETRY_CALLBACK_PREFIX):]
+    if not token or len(data) > 64 or len(token) > 64:
+        await _answer_callback(query, "This retry button is no longer valid.")
+        return
+
+    state = _get_retry_state(token)
+    if state is None:
+        await _answer_callback(query, "This retry button has expired or the bot restarted.")
+        return
+
+    message = query.message
+    query_chat = getattr(getattr(message, "chat", None), "id", None)
+    query_message_id = getattr(message, "message_id", None)
+    if (message is None or query_chat != state.chat_id
+            or query_message_id != state.bot_message_id):
+        await _answer_callback(query, "This retry button is no longer valid.")
+        return
+
+    user = query.from_user
+    if user is None:
+        await _answer_callback(query, "This retry button is no longer valid.")
+        return
+    authorised = user.id == state.owner_id
+    if not authorised:
+        try:
+            member = await context.bot.get_chat_member(state.chat_id, user.id)
+            authorised = member.status in ("administrator", "creator")
+        except TelegramError:
+            authorised = False
+    if not authorised:
+        await _answer_callback(query, "Only the original poster or a chat admin can do that.")
+        return
+    if _get_retry_state(token) is not state:
+        await _answer_callback(query, "This retry button has expired or the bot restarted.")
+        return
+
+    # This flag is set before the first await so two rapid callbacks cannot
+    # select the same target or race the state update.
+    if state.in_flight:
+        await _answer_callback(query, "A proxy retry is already in progress.")
+        return
+    now = time.monotonic()
+    if now - state.last_click_at < _RETRY_MIN_INTERVAL_SECONDS:
+        await _answer_callback(query, "Please wait before trying another proxy.")
+        return
+    remaining = _retry_remaining_targets(state)
+    if not remaining:
+        await _answer_callback(query, "No other configured proxy is available.")
+        return
+
+    target = remaining[0]
+    target_key = _retry_target_key(state.platform, target)
+    new_fixed_url = _retry_url(state, target)
+    new_text = _build_message(
+        state.platform, state.username, new_fixed_url, state.clean_url,
+        state.original_url, state.user_text,
+    )
+    if not _fits_telegram_message(new_text):
+        await _answer_callback(query, "The repost is too long to edit safely.")
+        return
+
+    state.in_flight = True
+    try:
+        await _edit_repost(
+            context.bot,
+            chat_id=state.chat_id,
+            message_id=state.bot_message_id,
+            text=new_text,
+            preview_url=new_fixed_url,
+            reply_markup=_retry_markup(
+                _RetryState(
+                    token=state.token,
+                    created_at=state.created_at,
+                    chat_id=state.chat_id,
+                    bot_message_id=state.bot_message_id,
+                    owner_id=state.owner_id,
+                    platform=state.platform,
+                    username=state.username,
+                    fixed_url=new_fixed_url,
+                    clean_url=state.clean_url,
+                    original_url=state.original_url,
+                    user_text=state.user_text,
+                    proxy_targets=state.proxy_targets,
+                    used_targets=state.used_targets | {target_key},
+                )
+            ),
+        )
+    except RetryAfter:
+        state.last_click_at = now
+        await _answer_callback(query, "Telegram is rate-limiting this retry; try again shortly.")
+        return
+    except BadRequest as error:
+        if not _is_message_not_modified(error):
+            state.last_click_at = now
+            await _answer_callback(query, "Telegram could not update this repost. Try again shortly.")
+            return
+        # A previous ambiguous request may already have been accepted by
+        # Telegram.  A later explicit click returning this no-op response is
+        # confirmation of the same target, so advance once without retrying
+        # the ambiguous request automatically.
+    except TelegramError:
+        state.last_click_at = now
+        await _answer_callback(query, "Telegram could not update this repost. Try again shortly.")
+        return
+    except Exception as error:  # noqa: BLE001 - transport mocks may raise other errors
+        state.last_click_at = now
+        logger.warning("Proxy retry edit failed (%s)", type(error).__name__)
+        await _answer_callback(query, "Telegram could not update this repost. Try again shortly.")
+        return
+    finally:
+        state.in_flight = False
+
+    # Advance only after Telegram confirmed the edit.  A failed or ambiguous
+    # request therefore leaves the same target available for an explicit retry.
+    state.used_targets.add(target_key)
+    state.fixed_url = new_fixed_url
+    state.last_click_at = now
+    if _retry_states.get(state.token) is state:
+        _retry_states.move_to_end(state.token, last=True)
+    await _answer_callback(query, "Reposted with another proxy.")
 
 
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1705,6 +2083,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Use the matched span, never a substring search which can hit a
             # shorter URL embedded in an earlier, unrelated candidate.
             user_text = message[:url_start] + message[url_start + len(candidate):]
+        final_user_text = user_text
         final_message = _build_message(
             platform, username, fixed_url, clean_url, candidate, user_text,
         )
@@ -1716,13 +2095,17 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             final_message = _build_message(
                 platform, username, fixed_url, clean_url, candidate, "",
             )
+            final_user_text = ""
         if not _fits_telegram_message(final_message):
             logger.warning("Link reply exceeds Telegram's message limit; keeping original")
             continue
 
+        retry_token, retry_markup = _initial_retry_markup(platform, fixed_url)
         try:
             bot_message = await _send_repost(
                 context.bot, chat, final_message, incoming.message_thread_id,
+                preview_url=fixed_url,
+                reply_markup=retry_markup,
             )
         except Forbidden:
             logger.warning("Bot may not send messages in this chat")
@@ -1736,6 +2119,20 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         sent_count += 1
         user_text_attached = user_text_attached or attaches_text
         _remember_poster(chat.id, bot_message.message_id, user.id)
+        retry_state = _new_retry_state(
+            chat_id=chat.id,
+            bot_message_id=bot_message.message_id,
+            owner_id=user.id,
+            platform=platform,
+            username=username,
+            fixed_url=fixed_url,
+            clean_url=clean_url,
+            original_url=candidate,
+            user_text=final_user_text,
+            token=retry_token,
+        )
+        if retry_state is not None:
+            _store_retry_state(retry_state)
         try:
             await _save_delete_token(bot_message.message_id, chat.id, user.id)
             if not stats_tracked:
@@ -1819,6 +2216,9 @@ def main() -> None:
     application.add_handler(CommandHandler("delete", delete_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("setproxy", setproxy_command))
+    application.add_handler(CallbackQueryHandler(
+        retry_callback, pattern=r"^fxr:[A-Za-z0-9_-]{1,64}$",
+    ))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_message))
 
     # Periodic proxy probe (IG + TikTok) closes circuit breakers without
