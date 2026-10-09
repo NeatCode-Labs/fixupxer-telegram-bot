@@ -216,6 +216,31 @@ def test_instagram_stkn_message_delivers_clean_links_before_deleting_original(mo
     assert f"]({original})" in sent["text"]  # Explicit original link remains available.
 
 
+def test_instagram_rotating_params_message_delivers_clean_links_before_deleting_original(monkeypatch):
+    monkeypatch.setattr(bot, "IG_CACHE_BUST", False)
+    original = (
+        "https://www.instagram.com/reel/DeQMt21oZ9Y/"
+        "?exln=MWQ2dWVhcm1pYndsag==&obrf=MWozZ3k1aGgyYzlnMQ=="
+        "&vrfl=MXVyMTZhZnU4OWNjMA==&img_index=0002&custom=a%26b%3Dc#slide"
+    )
+    clean = "https://www.instagram.com/reel/DeQMt21oZ9Y/?img_index=2"
+    fixed = f"https://{bot.IG_PROXY_ORDER[0]}/reel/DeQMt21oZ9Y/?img_index=2"
+    update, context = _incoming(f"Keep this explanation {original}", thread_id=42)
+    operations = Mock()
+    operations.attach_mock(context.bot.send_message, "send")
+    operations.attach_mock(update.message.delete, "delete")
+
+    _run(bot.process_message(update, context))
+
+    assert [operation[0] for operation in operations.mock_calls] == ["send", "delete"]
+    sent = context.bot.send_message.await_args.kwargs
+    assert sent["message_thread_id"] == 42
+    assert "Keep this explanation" in sent["text"]
+    assert f"]({fixed})" in sent["text"]
+    assert f"]({clean})" in sent["text"]
+    assert f"]({original})" in sent["text"]  # Explicit original link remains available.
+
+
 @pytest.mark.parametrize("text", ["No link here", "https://example.com/already-clean"])
 def test_messages_with_nothing_to_process_are_untouched(text):
     update, context = _incoming(text)

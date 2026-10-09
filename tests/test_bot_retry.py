@@ -107,7 +107,7 @@ def test_retry_preserves_tiktok_prefix_functional_query_and_fragment(monkeypatch
     assert "#clip" in edited["link_preview_options"].url
 
 
-def test_retry_preserves_instagram_functional_query_and_fragment(monkeypatch):
+def test_retry_keeps_instagram_carousel_selector_but_drops_canonical_fragment(monkeypatch):
     monkeypatch.setattr(bot, "_RETRY_MIN_INTERVAL_SECONDS", 0)
     original = "https://instagram.com/p/ABC/?stkn=gone&img_index=2#comments"
     update, context = _incoming(original)
@@ -116,17 +116,42 @@ def test_retry_preserves_instagram_functional_query_and_fragment(monkeypatch):
     sent = context.bot.send_message.await_args.kwargs
     first_proxy = bot.IG_PROXY_ORDER[0]
     second_proxy = bot.IG_PROXY_ORDER[1]
-    assert sent["link_preview_options"].url == (
-        f"https://{first_proxy}/p/ABC/?img_index=2#comments"
-    )
+    assert sent["link_preview_options"].url == f"https://{first_proxy}/p/ABC/?img_index=2"
+    assert f"]({original})" in sent["text"]
     token = _token_from_sent(sent)
     context.bot.edit_message_text = AsyncMock(return_value=SimpleNamespace(message_id=101))
     callback_update, _ = _callback(update, token)
     _run(bot.retry_callback(callback_update, context))
 
     edited = context.bot.edit_message_text.await_args.kwargs
+    assert edited["link_preview_options"].url == f"https://{second_proxy}/p/ABC/?img_index=2"
+
+
+def test_retry_from_instagram_proxy_keeps_gallery_path_query_and_fragment(monkeypatch):
+    monkeypatch.setattr(bot, "_RETRY_MIN_INTERVAL_SECONDS", 0)
+    first_proxy, second_proxy = bot.IG_PROXY_ORDER[1:3]
+    original = (
+        f"https://{first_proxy}/p/ABC/photo/2"
+        "?stkn=gone&img_index=2&custom=a%26b#comments"
+    )
+    update, context = _incoming(original)
+    _run(bot.process_message(update, context))
+
+    sent = context.bot.send_message.await_args.kwargs
+    first_clean = f"https://{first_proxy}/p/ABC/photo/2?img_index=2&custom=a%26b#comments"
+    assert sent["link_preview_options"].url == first_clean
+    assert f"]({original})" in sent["text"]
+    token = _token_from_sent(sent)
+    state = bot._retry_states[token]
+    assert state.clean_url is None  # Existing proxy input has no separate origin fallback.
+
+    context.bot.edit_message_text = AsyncMock(return_value=SimpleNamespace(message_id=101))
+    callback_update, _ = _callback(update, token)
+    _run(bot.retry_callback(callback_update, context))
+
+    edited = context.bot.edit_message_text.await_args.kwargs
     assert edited["link_preview_options"].url == (
-        f"https://{second_proxy}/p/ABC/?img_index=2#comments"
+        f"https://{second_proxy}/p/ABC/photo/2?img_index=2&custom=a%26b#comments"
     )
 
 
@@ -357,9 +382,11 @@ def test_concurrent_and_repeated_clicks_are_throttled(monkeypatch):
 
 def test_instagram_retry_cycles_through_all_targets_and_keeps_button(monkeypatch):
     monkeypatch.setattr(bot, "_RETRY_MIN_INTERVAL_SECONDS", 0)
+    original = "https://instagram.com/p/Cycle/?igsh=tracking&img_index=2#comments"
     update, context, sent, token, _, _ = _prepare_ig_retry(
-        "Keep this caption https://instagram.com/p/Cycle/?igsh=tracking&img_index=2#comments"
+        f"Keep this caption {original}"
     )
+    assert f"]({original})" in sent["text"]
     context.bot.edit_message_text = AsyncMock(return_value=SimpleNamespace(message_id=101))
     tracker = AsyncMock()
     monkeypatch.setattr(bot, "track_conversion", tracker)
@@ -376,7 +403,7 @@ def test_instagram_retry_cycles_through_all_targets_and_keeps_button(monkeypatch
         edited = context.bot.edit_message_text.await_args_list[-1].kwargs
         assert edited["message_id"] == 101
         assert edited["chat_id"] == update.effective_chat.id
-        assert edited["link_preview_options"].url == f"https://{expected_host}/p/Cycle/?img_index=2#comments"
+        assert edited["link_preview_options"].url == f"https://{expected_host}/p/Cycle/?img_index=2"
         assert state.fixed_url == edited["link_preview_options"].url
         assert edited["reply_markup"] is not None
         assert "Keep this caption" in edited["text"]

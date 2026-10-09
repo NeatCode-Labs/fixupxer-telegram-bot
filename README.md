@@ -6,6 +6,12 @@ A Telegram bot that removes known tracking parameters from URLs and converts X/T
   <img src="fixupxer_round.png" alt="FixupXer Bot Logo" width="150">
 </p>
 
+## Changes in 0.4.2 (2026-10-09)
+
+Instagram cleaning now has a path-scoped rule for valid HTTP(S) public post permalinks on exactly `instagram.com`, `www.instagram.com` and `m.instagram.com`, with no user information and no non-default port: `/p/`, `/reel/`, `/reels/` and `/tv/` shortcode paths, optionally preceded by a username, lose their query and fragment. A single positive integer `img_index` is retained and normalized; repeated values are retained only when they all identify the same index. This removes newly named parameters such as `vrfl` without claiming anything about that parameter's meaning.
+
+Other Instagram routes and recognised or configured proxy hosts keep the existing exact-key cleanup. That conservative path removes known tracking keys such as `exln` and `obrf` while preserving unknown or functional parameters and fragments; case variants and double-encoded forms remain untouched there. Malformed URLs stay on that existing path as well.
+
 ## Changes in 0.4.1 (2026-09-20)
 
 **Try another proxy** now cycles through the configured frontends and stays available after a complete cycle. You can return to a proxy that showed a working preview instead of getting stuck on the last alternative. The same message, text and attribution are preserved; ownership checks, click throttling and the 24-hour button lifetime still apply.
@@ -26,12 +32,12 @@ Instagram cleaning now removes the `stkn` share parameter from Instagram URLs an
 
 This release also closes two existing bot cleaning gaps: `igsi`, already covered by the Android app, and `ig_rid`, listed in [Brave's Instagram cleaning rules](https://github.com/brave/adblock-lists/blob/master/brave-lists/clean-urls.json). Both are existing parameters. For example, `https://www.instagram.com/reel/Da0a2ylvv4z/?igsi=Nm44MGppNTFIZXNw` now cleans to `https://www.instagram.com/reel/Da0a2ylvv4z/`.
 
-Unknown and functional parameters, such as `img_index` and `story_media_id`, remain intact. The existing exact, case-sensitive key policy applies to `stkn`, `igsi` and `ig_rid`: duplicate pairs and keys percent-encoded once are removed; differently cased keys, double-encoded keys and fragment contents are preserved. Other hosts, including retired unsafe frontends, do not receive these Instagram-specific rules.
+At the time of 0.3.2, unknown and functional parameters, such as `img_index` and `story_media_id`, remained intact across Instagram paths. The 0.4.2 canonical permalink rule above now applies only to first-party public post permalinks; special routes and proxy hosts retain that conservative behavior. The exact, case-sensitive key policy applies to `stkn`, `igsi` and `ig_rid`: duplicate pairs and keys percent-encoded once are removed; differently cased keys, double-encoded keys and fragment contents are preserved. Other hosts, including retired unsafe frontends, do not receive these Instagram-specific rules.
 
 ## ✨ Features
 
 - 🔄 **Automatic Link Conversion**: Cleans and converts X/Twitter, Instagram and TikTok links for improved embeds; Facebook receives tracking removal only
-- 🧹 **Tracking Removal**: Removes known platform tracking parameters and generic UTM/click IDs while preserving unknown or functional URL parameters
+- 🧹 **Tracking Removal**: Removes known platform tracking parameters and generic UTM/click IDs while preserving unknown or functional URL parameters, with a scoped Instagram public-permalink rule that retains only a valid carousel selector
 - 🔁 **Auto‑healing Instagram & TikTok proxies**: Health‑checks each candidate's OpenGraph tags before replying, falls back through the configured list, opens a circuit breaker on consistent failures
 - 🎯 **Prefers direct‑serving proxies**: A proxy that 302s back to `instagram.com` (common for `/reel/` paths) is only used as a last resort — the bot keeps probing for a proxy that serves the embed itself, because Telegram doesn't render previews for plain `instagram.com` links
 - ♻️ **Migrates recognised legacy proxy URLs**: Known legacy Instagram and TikTok hosts can be redirected to the configured active roster; retired unsafe frontends are excluded
